@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS client_flow_aggs (
   ts              INTEGER NOT NULL,
   src_ip          TEXT NOT NULL,
   customer_prefix TEXT,
+  src_port        INTEGER NOT NULL DEFAULT 0,
   dst_ip          TEXT NOT NULL,
   dst_port        INTEGER NOT NULL,
   protocol        INTEGER NOT NULL,
@@ -42,6 +43,13 @@ CREATE INDEX IF NOT EXISTS idx_suspicious_open ON suspicious_clients(src_ip, sig
 """
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(client_flow_aggs)")}
+    if "src_port" not in cols:
+        conn.execute("ALTER TABLE client_flow_aggs ADD COLUMN src_port INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+
+
 def connect(db_path: str, check_same_thread: bool = True) -> sqlite3.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
@@ -50,6 +58,7 @@ def connect(db_path: str, check_same_thread: bool = True) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
     conn.commit()
+    _migrate(conn)
     return conn
 
 
@@ -58,11 +67,11 @@ def insert_client_flow_aggs_batch(conn: sqlite3.Connection, rows: list[dict]) ->
         return
     conn.executemany(
         """INSERT INTO client_flow_aggs
-           (ts, src_ip, customer_prefix, dst_ip, dst_port, protocol, bytes, packets, dst_asn, dst_country)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (ts, src_ip, customer_prefix, src_port, dst_ip, dst_port, protocol, bytes, packets, dst_asn, dst_country)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         [
-            (r["ts"], r["src_ip"], r.get("customer_prefix"), r["dst_ip"], r["dst_port"], r["protocol"],
-             r["bytes"], r["packets"], r.get("dst_asn"), r.get("dst_country"))
+            (r["ts"], r["src_ip"], r.get("customer_prefix"), r.get("src_port", 0), r["dst_ip"], r["dst_port"],
+             r["protocol"], r["bytes"], r["packets"], r.get("dst_asn"), r.get("dst_country"))
             for r in rows
         ],
     )

@@ -19,6 +19,7 @@ from scapy.all import sniff
 sys.path.insert(0, "/root/flowguard")  # reuso somente-leitura do parser do FlowGuard
 from collector.netflow import parse_packet, TemplateStore  # noqa: E402
 
+import detector
 import storage
 
 LOG = logging.getLogger("clientguard")
@@ -47,6 +48,7 @@ class ClientGuardDaemon:
         self.queue: queue.Queue = queue.Queue(maxsize=200_000)
         self.conn = storage.connect(self.config["database"]["path"], check_same_thread=False)
         self.customers = load_yaml_list(self.config["customer_registry"])
+        self.whitelist = set(load_yaml_list(self.config["whitelist_file"]))
         self._stop = threading.Event()
         self._cycle_count = 0
 
@@ -83,7 +85,7 @@ class ClientGuardDaemon:
 
         groups: dict[tuple, dict] = defaultdict(lambda: {"bytes": 0, "packets": 0})
         for rec in records:
-            key = (rec.src_ip, rec.dst_ip, rec.dst_port, rec.protocol)
+            key = (rec.src_ip, rec.src_port, rec.dst_ip, rec.dst_port, rec.protocol)
             g = groups[key]
             g["bytes"] += rec.real_bytes
             g["packets"] += rec.real_packets
@@ -92,14 +94,18 @@ class ClientGuardDaemon:
         rows = [
             {
                 "ts": now, "src_ip": src_ip, "customer_prefix": resolve_customer_prefix(src_ip, self.customers),
-                "dst_ip": dst_ip, "dst_port": dst_port, "protocol": protocol,
+                "src_port": src_port, "dst_ip": dst_ip, "dst_port": dst_port, "protocol": protocol,
                 "bytes": g["bytes"], "packets": g["packets"],
             }
-            for (src_ip, dst_ip, dst_port, protocol), g in groups.items()
+            for (src_ip, src_port, dst_ip, dst_port, protocol), g in groups.items()
         ]
         if rows:
             storage.insert_client_flow_aggs_batch(self.conn, rows)
-            LOG.info("agregação: %d flows -> %d grupos (src_ip,dst_ip,dst_port,protocolo)", len(records), len(groups))
+            LOG.info(
+                "agregação: %d flows -> %d grupos (src_ip,src_port,dst_ip,dst_port,protocolo)",
+                len(records), len(groups),
+            )
+            detector.run_all(self.conn, self.config, self.whitelist)
 
         self._cycle_count += 1
         interval = self.config["database"]["aggregate_interval_s"]
