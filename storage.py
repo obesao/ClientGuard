@@ -116,6 +116,16 @@ def touch_signal(conn: sqlite3.Connection, signal_id: int, evidence: str) -> Non
     conn.commit()
 
 
+def mark_notified(conn: sqlite3.Connection, signal_id: int) -> None:
+    conn.execute("UPDATE suspicious_clients SET notified = 1 WHERE id = ?", (signal_id,))
+    conn.commit()
+
+
+def save_ai_explanation(conn: sqlite3.Connection, signal_id: int, explanation: str) -> None:
+    conn.execute("UPDATE suspicious_clients SET ai_explanation = ? WHERE id = ?", (explanation, signal_id))
+    conn.commit()
+
+
 def list_suspicious_clients(conn: sqlite3.Connection, resolved: bool = False, since_s: int = 86400) -> list[dict]:
     cutoff = int(time.time()) - since_s
     rows = conn.execute(
@@ -123,3 +133,38 @@ def list_suspicious_clients(conn: sqlite3.Connection, resolved: bool = False, si
         (1 if resolved else 0, cutoff),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def resolve_signal(conn: sqlite3.Connection, signal_id: int) -> bool:
+    cur = conn.execute(
+        "UPDATE suspicious_clients SET resolved = 1 WHERE id = ? AND resolved = 0", (signal_id,),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def top_src_ips(conn: sqlite3.Connection, window_s: int, limit: int) -> list[dict]:
+    since = int(time.time()) - window_s
+    rows = conn.execute(
+        """SELECT src_ip, customer_prefix, SUM(bytes) AS bytes, SUM(packets) AS packets, COUNT(*) AS flows
+           FROM client_flow_aggs WHERE ts >= ?
+           GROUP BY src_ip ORDER BY bytes DESC LIMIT ?""",
+        (since, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def daemon_stats(conn: sqlite3.Connection, window_s: int) -> dict:
+    since = int(time.time()) - window_s
+    flows_window = conn.execute(
+        "SELECT COUNT(*) FROM client_flow_aggs WHERE ts >= ?", (since,),
+    ).fetchone()[0]
+    distinct_src_ips = conn.execute(
+        "SELECT COUNT(DISTINCT src_ip) FROM client_flow_aggs WHERE ts >= ?", (since,),
+    ).fetchone()[0]
+    total_rows = conn.execute("SELECT COUNT(*) FROM client_flow_aggs").fetchone()[0]
+    open_signals = conn.execute("SELECT COUNT(*) FROM suspicious_clients WHERE resolved = 0").fetchone()[0]
+    return {
+        "flows_window": flows_window, "distinct_src_ips": distinct_src_ips,
+        "total_rows": total_rows, "open_signals": open_signals,
+    }

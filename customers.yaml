@@ -1,4 +1,24 @@
-# customers.yaml — cadastro de prefixos de clientes (src_ip -> customer_prefix/nome).
-# Se já existir cadastro em outro sistema (RADIUS, ERP), preferir reusar aquele;
-# este arquivo é o fallback caso não haja nada melhor disponível.
-[]
+# customers.yaml — cadastro de redes de clientes (network CIDR -> customer_prefix/nome).
+# src_ip do flow é resolvido pro customer_prefix se cair dentro de alguma 'network' aqui
+# (aceita /32 pra host único ou qualquer CIDR). Se já existir cadastro em outro sistema
+# (RADIUS, ERP), preferir reusar aquele; este arquivo é o fallback.
+# Editável diretamente ou via: clientguard-cli customers add|del <network> <prefix>
+- network: 177.86.16.0/24
+  prefix: 177.86.16.0/24
+- network: 177.86.17.0/24
+  prefix: 177.86.17.0/24
+- network: 177.86.18.0/24
+  prefix: 177.86.18.0/24
+- network: 177.86.19.0/24
+  prefix: 177.86.19.0/24
+- network: 177.86.20.0/24
+  prefix: 177.86.20.0/24
+- network: 177.86.21.0/24
+  prefix: 177.86.21.0/24
+- network: 177.86.22.0/24
+  prefix: 177.86.22.0/24
+- network: 177.86.23.0/24
+  prefix: 177.86.23.0/24
+- network: 100.64.0.0/10
+  prefix: 100.64.0.0/10
+  name: CGNAT-A10

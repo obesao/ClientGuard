@@ -1,4 +1,4 @@
 # whitelist.yaml — src_ip/prefixos que NUNCA devem gerar alerta no ClientGuard
 # (servidores de e-mail/DNS/NTP legítimos de clientes corporativos, backups, etc.)
-# Populado na etapa "Criar whitelist de clientes/serviços legítimos".
-[]
+# Editável diretamente ou via: clientguard-cli whitelist add|del <ip>
+- 177.86.16.36

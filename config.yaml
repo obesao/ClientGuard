@@ -1,5 +1,8 @@
 # ClientGuard — config própria, independente do FlowGuard.
 
+daemon:
+  socket: /var/run/clientguard.sock   # socket de controle consumido pelo clientguard-cli
+
 capture:
   iface: lo   # tráfego pra 10.77.77.21:2055 é endereço local do próprio host — o kernel
               # roteia via loopback (confirmado com `ip route get 10.77.77.21`), nunca
@@ -27,8 +30,35 @@ detection:
   amplifier_min_bps: 5000000
   spam_ports: [25, 465, 587]
   spam_min_distinct_dest: 20
+  coordinated_min_clients: 3        # N clientes distintos no mesmo dst_ip:dst_port pra contar como coordenado
+  coordinated_exclude_ports: [80, 443, 53]   # portas web/DNS comuns, exclui ruído óbvio de CDN/HTTPS/DNS
+  # pacotes DNS (udp/53) pro mesmo resolver na janela, JÁ multiplicado pelo sampling_rate
+  # (real_packets = packets * sampling_rate, igual usado em amplifier_min_bps) — com
+  # sampling_rate=1000, isso equivale a exigir ~20 pacotes amostrados na origem pra esse
+  # fluxo específico, bem acima do que navegação normal costuma gerar por resolver.
+  dns_tunneling_min_queries: 20000
   window_s: 30
   min_duration_s: 10
 
 alerts:
   webhook_url: ""
+
+ai:
+  enabled: true
+  env_file: /root/ai/.env   # mesmo .env do FlowGuard, ANTHROPIC_API_KEY (fora do repo/git)
+  model: claude-haiku-4-5-20251001
+  min_confidence: 0.0        # explica qualquer sinal novo; suba pra só explicar os mais confiáveis
+  rate_limit_rpm: 5
+
+threat_feed:
+  # Implementação própria do ClientGuard (o FlowGuard só tem essa seção no config.yaml
+  # dele, nunca implementou o download). Mescla feeds públicos de reputação num cache
+  # local, refeito a cada update_interval_h; detect_malicious_contact usa esse cache.
+  enabled: true
+  cache_file: /root/clientguard/db/threat_ips.txt
+  update_interval_h: 6
+  sources:
+    - https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+    - https://www.spamhaus.org/drop/drop.txt
+    - https://www.spamhaus.org/drop/edrop.txt
+    - https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt
