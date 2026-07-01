@@ -1,0 +1,13 @@
+[Unit]
+Description=ClientGuard — Detecção de Clientes Comprometidos via NetFlow
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/root/clientguard/venv/bin/python3 /root/clientguard/clientguard.py /root/clientguard/config.yaml
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

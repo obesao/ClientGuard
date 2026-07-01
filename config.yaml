@@ -1,7 +1,9 @@
 # ClientGuard — config própria, independente do FlowGuard.
 
 capture:
-  iface: ens18
+  iface: lo   # tráfego pra 10.77.77.21:2055 é endereço local do próprio host — o kernel
+              # roteia via loopback (confirmado com `ip route get 10.77.77.21`), nunca
+              # aparece na interface física ens18. Sniffar em "lo" é o ponto certo.
   bpf_filter: "udp port 2055"   # mesmo tráfego que já chega pro FlowGuard, só observado
   sampling_rate: 1000            # mesmo valor do NE8000 usado pelo FlowGuard (collector.sampling_rate)
 
