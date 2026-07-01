@@ -1,0 +1,32 @@
+# ClientGuard — config própria, independente do FlowGuard.
+
+capture:
+  iface: ens18
+  bpf_filter: "udp port 2055"   # mesmo tráfego que já chega pro FlowGuard, só observado
+  sampling_rate: 1000            # mesmo valor do NE8000 usado pelo FlowGuard (collector.sampling_rate)
+
+database:
+  path: /root/clientguard/db/client_flow.sqlite
+  retention_days: 7
+  aggregate_interval_s: 30
+
+flowguard_reuse:
+  # Import somente-leitura do parser de NetFlow do FlowGuard (collector/netflow.py) —
+  # nenhum arquivo dentro desse caminho é modificado pelo ClientGuard.
+  path: /root/flowguard
+
+customer_registry: /root/clientguard/customers.yaml
+whitelist_file: /root/clientguard/whitelist.yaml
+
+detection:
+  scan_horizontal_hosts: 30      # N destinos distintos, mesma porta, pra contar como scan horizontal
+  scan_vertical_ports: 30        # N portas distintas, mesmo destino, pra contar como scan vertical
+  amplifier_ports: [53, 123, 1900, 11211, 389]
+  amplifier_min_bps: 5000000
+  spam_ports: [25, 465, 587]
+  spam_min_distinct_dest: 20
+  window_s: 30
+  min_duration_s: 10
+
+alerts:
+  webhook_url: ""

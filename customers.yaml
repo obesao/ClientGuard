@@ -1,0 +1,4 @@
+# customers.yaml — cadastro de prefixos de clientes (src_ip -> customer_prefix/nome).
+# Se já existir cadastro em outro sistema (RADIUS, ERP), preferir reusar aquele;
+# este arquivo é o fallback caso não haja nada melhor disponível.
+[]
