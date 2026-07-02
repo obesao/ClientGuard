@@ -61,7 +61,7 @@ class ClientGuardDaemon:
         self.whitelist = set(configio.load_yaml_list(self.config["whitelist_file"]))
         self.ai_client = ai_client.AIClient(self.config.get("ai", {}))
         self.threat_feed = threat_feed.ThreatFeed(self.config.get("threat_feed", {}).get("cache_file", ""))
-        self.geoip = geoip.GeoIPCache()
+        self.geoip = geoip.GeoIPCache(self.conn, self.db_lock)
         self._stop = threading.Event()
         self._cycle_count = 0
         self.started_at = time.time()

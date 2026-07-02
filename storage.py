@@ -37,6 +37,16 @@ CREATE TABLE IF NOT EXISTS suspicious_clients (
   resolved        INTEGER DEFAULT 0
 );
 
+-- Cache persistente de geoip.GeoIPCache — ASN/país de um IP não muda em escala de
+-- horas, então persistir evita reconsultar a Team Cymru pra todo IP já visto a cada
+-- restart do daemon (antes, o cache era só em memória e se perdia no restart).
+CREATE TABLE IF NOT EXISTS geoip_cache (
+  ip      TEXT PRIMARY KEY,
+  asn     INTEGER,
+  country TEXT,
+  ts      INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_client_flow_ts ON client_flow_aggs(ts);
 CREATE INDEX IF NOT EXISTS idx_client_flow_src ON client_flow_aggs(src_ip, ts);
 -- dst_ip líder: serve tanto o lookup exato (dst_ip, dst_port) do detect_shared_destination
@@ -174,3 +184,19 @@ def daemon_stats(conn: sqlite3.Connection, window_s: int) -> dict:
         "flows_window": flows_window, "distinct_src_ips": distinct_src_ips,
         "total_rows": total_rows, "open_signals": open_signals,
     }
+
+
+def load_geoip_cache(conn: sqlite3.Connection) -> dict[str, tuple[int | None, str | None]]:
+    rows = conn.execute("SELECT ip, asn, country FROM geoip_cache").fetchall()
+    return {r["ip"]: (r["asn"], r["country"]) for r in rows}
+
+
+def save_geoip_batch(conn: sqlite3.Connection, entries: list[tuple[str, int | None, str | None]]) -> None:
+    if not entries:
+        return
+    now = int(time.time())
+    conn.executemany(
+        "INSERT OR REPLACE INTO geoip_cache (ip, asn, country, ts) VALUES (?, ?, ?, ?)",
+        [(ip, asn, country, now) for ip, asn, country in entries],
+    )
+    conn.commit()

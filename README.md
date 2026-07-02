@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.1.1**
+**Versão atual: v1.2.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor POX Network.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -80,6 +80,18 @@ clientguard-cli customers add|del <network> <prefix>
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.2.0 — 2026-07-01 — Cache de GeoIP persistente
+- `geoip_cache` (tabela SQLite nova) — o cache ASN/país deixa de ser só em
+  memória; sobrevive a restart do daemon, sem reconsultar a Team Cymru pra IPs
+  já vistos. Testado ponta a ponta: enriquecido → gravado → sobrevive a
+  `systemctl restart`.
+- Corrigido no mesmo pente: falha de rede na consulta à Cymru não marca mais o
+  IP como "sem dado" permanentemente — antes, qualquer instabilidade de rede
+  virava um `(None, None)` cacheado para sempre (só reiniciava porque o cache
+  era em memória; com persistência isso viraria permanente de verdade). Agora
+  só grava resultado negativo quando a consulta teve resposta e o IP
+  simplesmente não veio nela.
 
 ### v1.1.1 — 2026-07-01 — Índice de performance pra queries por dst_ip
 - `idx_client_flow_dst (dst_ip, dst_port, ts)` — `detect_malicious_contact`
