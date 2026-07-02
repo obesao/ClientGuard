@@ -32,6 +32,9 @@ SIGNAL_LABELS = {
 }
 
 
+DEFAULT_FLOWGUARD_SOCKET_PATH = "/var/run/flowguard.sock"
+
+
 def resolve_socket_path(config_path: str) -> str:
     try:
         with open(config_path, "r", encoding="utf-8") as fh:
@@ -39,6 +42,30 @@ def resolve_socket_path(config_path: str) -> str:
         return cfg["daemon"]["socket"]
     except (OSError, KeyError, TypeError):
         return DEFAULT_SOCKET_PATH
+
+
+def resolve_flowguard_socket_path(config_path: str) -> str:
+    """BGP é gerenciado pelo FlowGuard (ExaBGP), não pelo ClientGuard — só consultamos
+    o status via socket dele, sem nenhum código/config compartilhado além disso."""
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        return cfg.get("flowguard_socket") or DEFAULT_FLOWGUARD_SOCKET_PATH
+    except OSError:
+        return DEFAULT_FLOWGUARD_SOCKET_PATH
+
+
+def fetch_bgp_status(fg_sock_path: str) -> dict:
+    resp = send_command(fg_sock_path, {"cmd": "bgp_status"}, timeout=1.5)
+    if not resp.get("ok"):
+        return {"peer_state": "down", "detail": resp.get("error", "FlowGuard indisponível")}
+    return resp
+
+
+def fmt_bgp_state(bgp: dict) -> str:
+    if bgp.get("peer_state") == "up":
+        return "[bold green]Up[/bold green]"
+    return "[bold red]Down/Idle[/bold red]"
 
 
 def send_command(sock_path: str, payload: dict, timeout: float = 6.0) -> dict:
@@ -112,6 +139,11 @@ def cmd_status(args: argparse.Namespace, sock_path: str) -> None:
     table.add_row("Sinais suspeitos abertos", str(resp["open_signals"]))
     table.add_row("Clientes cadastrados", str(resp["n_customers"]))
     table.add_row("IPs na whitelist", str(resp["n_whitelist"]))
+    bgp = fetch_bgp_status(resolve_flowguard_socket_path(args.config))
+    bgp_line = fmt_bgp_state(bgp)
+    if bgp.get("peer_ip"):
+        bgp_line += f"  ({bgp['peer_ip']})"
+    table.add_row("BGP (FlowGuard/ExaBGP)", bgp_line)
     console.print(table)
 
 
@@ -197,7 +229,7 @@ def cmd_stop(args: argparse.Namespace, sock_path: str) -> None:
 
 # --- modo interativo -------------------------------------------------------
 
-def build_dashboard(sock_path: str) -> Group:
+def build_dashboard(sock_path: str, fg_sock_path: str) -> Group:
     status = send_command(sock_path, {"cmd": "status"})
     now_str = time.strftime("%Y-%m-%d %H:%M:%S")
     if not status.get("ok"):
@@ -206,13 +238,15 @@ def build_dashboard(sock_path: str) -> Group:
 
     top = send_command(sock_path, {"cmd": "top", "limit": 10})
     suspicious = send_command(sock_path, {"cmd": "suspicious"})
+    bgp = fetch_bgp_status(fg_sock_path)
 
     statusbar = (
         f"Flows/janela: [bold]{status['flows_window']}[/bold]  |  "
         f"Clientes ativos: [bold]{status['distinct_src_ips']}[/bold]  |  "
         f"Sinais abertos: [bold red]{status['open_signals']}[/bold red]  |  "
         f"Cadastrados: [bold]{status['n_customers']}[/bold]  |  "
-        f"Whitelist: [bold]{status['n_whitelist']}[/bold]  |  Daemon: [green]OK[/green]"
+        f"Whitelist: [bold]{status['n_whitelist']}[/bold]  |  "
+        f"BGP: {fmt_bgp_state(bgp)}  |  Daemon: [green]OK[/green]"
     )
     header = Panel(statusbar, title=f"ClientGuard Monitor  |  {now_str}  |  Ctrl+C para sair")
 
@@ -242,12 +276,12 @@ def build_dashboard(sock_path: str) -> Group:
     return Group(header, top_table, suspicious_table)
 
 
-def run_interactive(sock_path: str, interval: float) -> None:
+def run_interactive(sock_path: str, fg_sock_path: str, interval: float) -> None:
     try:
-        with Live(build_dashboard(sock_path), console=console, screen=True, auto_refresh=False) as live:
+        with Live(build_dashboard(sock_path, fg_sock_path), console=console, screen=True, auto_refresh=False) as live:
             while True:
                 time.sleep(interval)
-                live.update(build_dashboard(sock_path), refresh=True)
+                live.update(build_dashboard(sock_path, fg_sock_path), refresh=True)
     except KeyboardInterrupt:
         pass
 
@@ -303,9 +337,10 @@ def main() -> None:
 
     args = parser.parse_args()
     sock_path = args.socket or resolve_socket_path(args.config)
+    fg_sock_path = resolve_flowguard_socket_path(args.config)
 
     if args.command is None:
-        run_interactive(sock_path, args.interval)
+        run_interactive(sock_path, fg_sock_path, args.interval)
         return
 
     args.func(args, sock_path)

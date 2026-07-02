@@ -3,6 +3,11 @@
 daemon:
   socket: /var/run/clientguard.sock   # socket de controle consumido pelo clientguard-cli
 
+# Só pra clientguard-cli consultar o status da sessão BGP (Up/Down) do FlowGuard —
+# BGP é gerenciado 100% pelo FlowGuard/ExaBGP, isso é só leitura via socket, sem
+# nenhum código ou config compartilhado além disso.
+flowguard_socket: /var/run/flowguard.sock
+
 capture:
   iface: lo   # tráfego pra 10.77.10.2:2055 é endereço local do próprio host — o kernel
               # roteia via loopback (confirmado com `ip route get 10.77.10.2`), nunca
