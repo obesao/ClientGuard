@@ -96,6 +96,19 @@ clientguard-cli toggles set <funcao> on|off
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
 
+### v1.9.0 — 2026-07-02 — Alertas via WhatsApp (CallMeBot)
+- `notifier.py` ganhou `send_whatsapp()` (CallMeBot, mesmo provedor/lógica do
+  FlowGuard, deliberadamente duplicado — os dois projetos continuam
+  independentes) ao lado do `send_webhook()` já existente.
+- `detector.py`: `_record_signal` dispara WhatsApp pra qualquer sinal NOVO
+  (não atualização de sinal já aberto) quando `alerts.whatsapp` está ligado e
+  a confiança do sinal atinge `alerts.min_confidence_wa` (default 0.8, pra
+  não virar spam com sinais de baixa confiança). `wa_cfg` foi roteado como
+  novo parâmetro opcional por todos os 7 detectores até `run_all`, mesmo
+  padrão já usado pra `webhook_url`.
+- `config.yaml`: `alerts.whatsapp`/`wa_dest`/`wa_apikey`/`min_confidence_wa`
+  (novos), ao lado do `webhook_url` já existente.
+
 ### v1.8.0 — 2026-07-02 — Configurações via portal: liga/desliga detectores + limpar suspeitos
 - `toggles.yaml` (novo, separado do `config.yaml` — mesmo motivo de
   whitelist/customers: editar via portal não pode reescrever/perder os
