@@ -11,9 +11,14 @@ daemon:
 flowguard_socket: /var/run/flowguard.sock
 
 capture:
-  iface: lo   # tráfego pra 10.77.10.2:2055 é endereço local do próprio host — o kernel
-              # roteia via loopback (confirmado com `ip route get 10.77.10.2`), nunca
-              # aparece na interface física ens18. Sniffar em "lo" é o ponto certo.
+  # `ip route get 10.77.10.2` mostra "dev lo" porque é a rota de SAÍDA pra um IP
+  # local — isso não tem relação com a interface de CHEGADA de tráfego externo.
+  # O NetFlow chega de verdade fisicamente em ens18 (confirmado com tcpdump: os
+  # pacotes vêm de fora, ex. 177.86.16.1:40000 -> 10.77.10.2:2055); sniffar "lo"
+  # nunca via esse tráfego. O socket do FlowGuard não sofre com isso porque ele
+  # recebe via bind de socket (não depende de interface), só a captura passiva
+  # do ClientGuard (scapy.sniff) é sensível a isso.
+  iface: ens18
   bpf_filter: "udp port 2055"   # mesmo tráfego que já chega pro FlowGuard, só observado
   sampling_rate: 1000            # mesmo valor do NE8000 usado pelo FlowGuard (collector.sampling_rate)
 
@@ -33,12 +38,28 @@ whitelist_file: /root/clientguard/whitelist.yaml
 detection:
   scan_horizontal_hosts: 30      # N destinos distintos, mesma porta, pra contar como scan horizontal
   scan_vertical_ports: 30        # N portas distintas, mesmo destino, pra contar como scan vertical
+  # tráfego P2P/torrent também bate muitos hosts/portas distintos, mas com volume real de
+  # dados por destino — scan de reconhecimento de verdade manda pacotes pequenos de sonda
+  # (às vezes só um SYN). 10000 (10 KB) de média por destino/porta separa os dois casos;
+  # acima disso é transferência de dados de verdade, não sonda.
+  scan_max_avg_bytes: 10000
   amplifier_ports: [53, 123, 1900, 11211, 389]
   amplifier_min_bps: 5000000
   spam_ports: [25, 465, 587]
   spam_min_distinct_dest: 20
-  coordinated_min_clients: 3        # N clientes distintos no mesmo dst_ip:dst_port pra contar como coordenado
-  coordinated_exclude_ports: [80, 443, 53]   # portas web/DNS comuns, exclui ruído óbvio de CDN/HTTPS/DNS
+  coordinated_min_clients: 8        # N clientes distintos no mesmo dst_ip:dst_port pra contar como coordenado
+  # portas de serviço compartilhado por natureza — QUALQUER app popular concentra muitos
+  # clientes na mesma porta desses serviços ao mesmo tempo, então isso não é indício de
+  # coordenação/scan. Usado tanto por scan_horizontal (que olha "muitos hosts, mesma
+  # porta") quanto por coordinated_destination (que olha "muitos clientes, mesmo
+  # destino"). Descoberto empiricamente: 853=DoT (ex. AdGuard/Cloudflare DNS), 3478=
+  # STUN/TURN (WebRTC — chamada de voz/vídeo), 5222/5223=XMPP/APNs (WhatsApp/Messenger,
+  # Apple Push), 5228=Firebase Cloud Messaging (push do Android) — sem isso, os dois
+  # detectores flagravam a maioria dos clientes ativos só por navegarem/usarem apps
+  # normalmente (visto em produção: ~1250 sinais abertos de ~1300, quase todo falso
+  # positivo, antes desse ajuste). 4500=IPsec NAT-T (VPN) — mesmo padrão, vários clientes
+  # no mesmo concentrador de VPN corporativa/comercial.
+  common_service_ports: [53, 80, 123, 443, 853, 3478, 4500, 5222, 5223, 5228]
   # pacotes DNS (udp/53) pro mesmo resolver na janela, JÁ multiplicado pelo sampling_rate
   # (real_packets = packets * sampling_rate, igual usado em amplifier_min_bps) — com
   # sampling_rate=1000, isso equivale a exigir ~20 pacotes amostrados na origem pra esse

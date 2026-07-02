@@ -3,6 +3,12 @@
 # (aceita /32 pra host único ou qualquer CIDR). Se já existir cadastro em outro sistema
 # (RADIUS, ERP), preferir reusar aquele; este arquivo é o fallback.
 # Editável diretamente ou via: clientguard-cli customers add|del <network> <prefix>
+#
+# client_multiplier: quantas identidades reais um único src_ip visível desse prefixo pode
+# representar combinadas (ex.: pool de CGNAT, onde 1 IP externo = várias pessoas atrás do
+# NAT). detector.py escala os limiares de volume/diversidade por esse fator pra não confundir
+# tráfego combinado de várias pessoas com o comportamento de 1 cliente só. Sem o campo (ou
+# valor 1), nenhum ajuste é aplicado.
 - network: 177.86.16.0/24
   prefix: 177.86.16.0/24
 - network: 177.86.17.0/24
@@ -13,8 +19,12 @@
   prefix: 177.86.19.0/24
 - network: 177.86.20.0/24
   prefix: 177.86.20.0/24
+  name: CGNAT-B20
+  client_multiplier: 32
 - network: 177.86.21.0/24
   prefix: 177.86.21.0/24
+  name: CGNAT-B21
+  client_multiplier: 32
 - network: 177.86.22.0/24
   prefix: 177.86.22.0/24
 - network: 177.86.23.0/24
@@ -22,3 +32,4 @@
 - network: 100.64.0.0/10
   prefix: 100.64.0.0/10
   name: CGNAT-A10
+  client_multiplier: 32

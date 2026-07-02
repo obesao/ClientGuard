@@ -43,6 +43,56 @@ def test_scan_horizontal_respects_whitelist(conn):
     assert not open_signals(conn)
 
 
+def test_scan_horizontal_ignores_excluded_ports(conn):
+    # navegação normal: dezenas de IPs de borda de CDN distintos na mesma porta 443 —
+    # sem a exclusão, isso é indistinguível de scan de reconhecimento
+    for i in range(50):
+        insert_flow(conn, "177.86.19.4", f"93.10.{i}.1", 443, protocol=6)
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=30, whitelist=set(), exclude_ports=[443])
+    assert not open_signals(conn)
+
+
+def test_scan_horizontal_still_triggers_on_non_excluded_port(conn):
+    for i in range(30):
+        insert_flow(conn, "177.86.19.5", f"45.10.{i}.1", 8080, protocol=6)
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=30, whitelist=set(), exclude_ports=[443, 80, 53])
+    assert "port_scan_horizontal" in signal_types(conn)
+
+
+def test_scan_horizontal_multiplier_suppresses_cgnat_pool_traffic(conn):
+    # 15 hosts distintos > threshold base (10), mas um IP de pool CGNAT combina o tráfego
+    # de várias pessoas reais — com multiplicador 4, o limiar efetivo (40) não é atingido
+    for i in range(15):
+        insert_flow(conn, "100.64.5.5", f"45.10.{i}.1", 22, protocol=6, customer_prefix="100.64.0.0/10")
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=10, whitelist=set(),
+                                     multipliers={"100.64.0.0/10": 4})
+    assert not open_signals(conn)
+
+
+def test_scan_horizontal_multiplier_still_triggers_above_effective_threshold(conn):
+    for i in range(45):
+        insert_flow(conn, "100.64.5.6", f"45.10.{i}.1", 22, protocol=6, customer_prefix="100.64.0.0/10")
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=10, whitelist=set(),
+                                     multipliers={"100.64.0.0/10": 4})
+    assert "port_scan_horizontal" in signal_types(conn)
+
+
+def test_scan_horizontal_ignores_p2p_traffic_with_real_volume(conn):
+    # muitos hosts distintos, mas 200KB por host — tráfego P2P/torrent de verdade, não
+    # sondas de reconhecimento (que mandam pacotes pequenos)
+    for i in range(35):
+        insert_flow(conn, "177.86.18.235", f"45.10.{i}.1", 4790, protocol=17, bytes_=200_000)
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=30, whitelist=set(), max_avg_bytes=10_000)
+    assert not open_signals(conn)
+
+
+def test_scan_horizontal_still_triggers_on_low_volume_probes(conn):
+    for i in range(30):
+        insert_flow(conn, "177.86.19.6", f"45.10.{i}.1", 8080, protocol=6, bytes_=60)
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=30, whitelist=set(), max_avg_bytes=10_000)
+    assert "port_scan_horizontal" in signal_types(conn)
+
+
 # --- scan vertical -----------------------------------------------------------
 
 def test_scan_vertical_triggers_above_threshold(conn):
@@ -57,6 +107,30 @@ def test_scan_vertical_below_threshold_no_signal(conn):
         insert_flow(conn, "177.86.19.5", "45.20.30.40", 1 + port, protocol=6)
     detector.detect_scan_vertical(conn, WINDOW_S, threshold=30, whitelist=set())
     assert not open_signals(conn)
+
+
+def test_scan_vertical_multiplier_suppresses_cgnat_pool_traffic(conn):
+    for port in range(15):
+        insert_flow(conn, "100.64.5.7", "45.20.30.40", 1 + port, protocol=6, customer_prefix="100.64.0.0/10")
+    detector.detect_scan_vertical(conn, WINDOW_S, threshold=10, whitelist=set(),
+                                   multipliers={"100.64.0.0/10": 4})
+    assert not open_signals(conn)
+
+
+def test_scan_vertical_ignores_p2p_traffic_with_real_volume(conn):
+    # muitas portas distintas no mesmo peer, mas com megabytes por porta — transferência
+    # de dados real (P2P), não varredura de vulnerabilidade
+    for port in range(35):
+        insert_flow(conn, "177.86.18.66", "168.0.164.242", 32796 + port, protocol=6, bytes_=1_000_000)
+    detector.detect_scan_vertical(conn, WINDOW_S, threshold=30, whitelist=set(), max_avg_bytes=10_000)
+    assert not open_signals(conn)
+
+
+def test_scan_vertical_still_triggers_on_low_volume_probes(conn):
+    for port in range(30):
+        insert_flow(conn, "177.86.19.7", "45.20.30.41", 1 + port, protocol=6, bytes_=60)
+    detector.detect_scan_vertical(conn, WINDOW_S, threshold=30, whitelist=set(), max_avg_bytes=10_000)
+    assert "port_scan_vertical" in signal_types(conn)
 
 
 # --- amplificador hospedado ---------------------------------------------------
@@ -80,6 +154,19 @@ def test_amplifier_needs_at_least_two_distinct_destinations(conn):
     assert not open_signals(conn)
 
 
+def test_amplifier_multiplier_suppresses_cgnat_pool_traffic(conn):
+    # mesmo volume do teste que dispara acima (~5.3 Mbps) — mas atrás de um pool CGNAT
+    # (multiplicador 4), o limiar efetivo (20 Mbps) não é atingido
+    insert_flow(conn, "100.64.5.8", "198.51.100.1", 33000, protocol=17,
+                bytes_=10_000_000, src_port=53, customer_prefix="100.64.0.0/10")
+    insert_flow(conn, "100.64.5.8", "198.51.100.2", 33001, protocol=17,
+                bytes_=10_000_000, src_port=53, customer_prefix="100.64.0.0/10")
+    detector.detect_amplifier(conn, WINDOW_S, ports=[53, 123, 1900, 11211, 389],
+                               min_bps=5_000_000, whitelist=set(),
+                               multipliers={"100.64.0.0/10": 4})
+    assert not open_signals(conn)
+
+
 def test_amplifier_ignores_non_service_ports(conn):
     insert_flow(conn, "177.86.19.8", "198.51.100.1", 33000, protocol=17,
                 bytes_=10_000_000, src_port=54321)  # porta não está na lista de amplificação
@@ -98,6 +185,14 @@ def test_spam_triggers_above_threshold(conn):
     detector.detect_spam(conn, WINDOW_S, spam_ports=[25, 465, 587], min_distinct_dest=20,
                           whitelist=set())
     assert "spam_bot" in signal_types(conn)
+
+
+def test_spam_multiplier_suppresses_cgnat_pool_traffic(conn):
+    for i in range(25):
+        insert_flow(conn, "100.64.5.9", f"203.0.{i}.1", 25, protocol=6, customer_prefix="100.64.0.0/10")
+    detector.detect_spam(conn, WINDOW_S, spam_ports=[25, 465, 587], min_distinct_dest=20,
+                          whitelist=set(), multipliers={"100.64.0.0/10": 4})
+    assert not open_signals(conn)
 
 
 def test_spam_ignores_non_spam_ports(conn):
@@ -177,6 +272,30 @@ def test_shared_destination_below_min_clients_no_signal(conn):
     assert not open_signals(conn)
 
 
+def test_shared_destination_multiplier_suppresses_cgnat_pool_convergence(conn):
+    # 5 IPs de pool CGNAT distintos > threshold base (3), mas cada um já combina várias
+    # pessoas reais — com multiplicador 4, o limiar efetivo do grupo (12) não é atingido
+    srcs = [f"100.64.6.{i}" for i in range(5)]
+    for i, src in enumerate(srcs):
+        insert_flow(conn, src, "198.51.44.93", 6667, protocol=6, src_port=50000 + i,
+                    customer_prefix="100.64.0.0/10")
+    detector.detect_shared_destination(conn, WINDOW_S, min_distinct_clients=3,
+                                        exclude_ports=[80, 443, 53], whitelist=set(),
+                                        multipliers={"100.64.0.0/10": 4})
+    assert not open_signals(conn)
+
+
+def test_shared_destination_multiplier_still_triggers_above_effective_threshold(conn):
+    srcs = [f"100.64.7.{i}" for i in range(13)]
+    for i, src in enumerate(srcs):
+        insert_flow(conn, src, "198.51.44.94", 6667, protocol=6, src_port=50000 + i,
+                    customer_prefix="100.64.0.0/10")
+    detector.detect_shared_destination(conn, WINDOW_S, min_distinct_clients=3,
+                                        exclude_ports=[80, 443, 53], whitelist=set(),
+                                        multipliers={"100.64.0.0/10": 4})
+    assert "coordinated_destination" in signal_types(conn)
+
+
 # --- DNS tunneling --------------------------------------------------------------
 
 def test_dns_tunneling_triggers_above_threshold(conn):
@@ -194,6 +313,16 @@ def test_dns_tunneling_below_threshold_no_signal(conn):
 def test_dns_tunneling_ignores_non_dns_udp(conn):
     insert_flow(conn, "177.86.23.42", "203.0.113.53", 5353, protocol=17, packets_=25_000)
     detector.detect_dns_tunneling(conn, WINDOW_S, min_queries=20_000, whitelist=set())
+    assert not open_signals(conn)
+
+
+def test_dns_tunneling_multiplier_suppresses_cgnat_pool_traffic(conn):
+    # volume de DNS combinado de várias pessoas atrás de um pool CGNAT — 25k queries
+    # passa do limiar base (20k), mas não do efetivo com multiplicador 4 (80k)
+    insert_flow(conn, "100.64.5.10", "8.8.8.8", 53, protocol=17, packets_=25_000,
+                customer_prefix="100.64.0.0/10")
+    detector.detect_dns_tunneling(conn, WINDOW_S, min_queries=20_000, whitelist=set(),
+                                   multipliers={"100.64.0.0/10": 4})
     assert not open_signals(conn)
 
 

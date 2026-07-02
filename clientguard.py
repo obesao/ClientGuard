@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """ClientGuard — coletor mínimo: captura passiva do mesmo NetFlow que já chega pro
-FlowGuard (sem competir pelo socket dele), agrega por src_ip (o cliente, não o
-prefixo de destino) e grava em SQLite próprio."""
+FlowGuard (sem competir pelo socket dele), agrega pelo cliente (não o prefixo de
+destino) e grava em SQLite próprio. O lado "cliente" do flow pode ser src ou dst
+dependendo da direção — ver customer_registry.classify_client_side."""
 
 from __future__ import annotations
 
@@ -10,7 +11,6 @@ import queue
 import sys
 import threading
 import time
-from collections import defaultdict
 from pathlib import Path
 
 import yaml
@@ -26,7 +26,7 @@ import geoip
 import socket_server
 import storage
 import threat_feed
-from customer_registry import resolve_customer_prefix
+from customer_registry import WhitelistMatcher, classify_client_side
 
 LOG = logging.getLogger("clientguard")
 
@@ -41,7 +41,7 @@ class ClientGuardDaemon:
         self.conn = storage.connect(self.config["database"]["path"], check_same_thread=False)
         self.db_lock = threading.Lock()
         self.customers = configio.load_yaml_list(self.config["customer_registry"])
-        self.whitelist = set(configio.load_yaml_list(self.config["whitelist_file"]))
+        self.whitelist = WhitelistMatcher(configio.load_yaml_list(self.config["whitelist_file"]))
         self.ai_client = ai_client.AIClient(self.config.get("ai", {}))
         self.threat_feed = threat_feed.ThreatFeed(self.config.get("threat_feed", {}).get("cache_file", ""))
         self.geoip = geoip.GeoIPCache(self.conn, self.db_lock)
@@ -52,7 +52,7 @@ class ClientGuardDaemon:
 
     def reload_config(self) -> None:
         self.customers = configio.load_yaml_list(self.config["customer_registry"])
-        self.whitelist = set(configio.load_yaml_list(self.config["whitelist_file"]))
+        self.whitelist = WhitelistMatcher(configio.load_yaml_list(self.config["whitelist_file"]))
         LOG.info("config recarregado: %d clientes cadastrados, %d na whitelist",
                  len(self.customers), len(self.whitelist))
 
@@ -104,35 +104,52 @@ class ClientGuardDaemon:
             except queue.Empty:
                 break
 
-        groups: dict[tuple, dict] = defaultdict(lambda: {"bytes": 0, "packets": 0})
+        groups: dict[tuple, dict] = {}
+        skipped = 0
         for rec in records:
-            key = (rec.src_ip, rec.src_port, rec.dst_ip, rec.dst_port, rec.protocol)
-            g = groups[key]
+            classified = classify_client_side(rec.src_ip, rec.dst_ip, self.customers)
+            if classified is None:
+                skipped += 1  # nenhum dos dois lados é cliente cadastrado — fora do escopo
+                continue
+            client_ip, other_ip, customer_prefix = classified
+            if client_ip == rec.src_ip:
+                client_port, other_port = rec.src_port, rec.dst_port
+            else:
+                client_port, other_port = rec.dst_port, rec.src_port
+            key = (client_ip, client_port, other_ip, other_port, rec.protocol)
+            g = groups.setdefault(key, {"bytes": 0, "packets": 0, "customer_prefix": customer_prefix})
             g["bytes"] += rec.real_bytes
             g["packets"] += rec.real_packets
 
-        dst_ips = {key[2] for key in groups}
-        self.geoip.enrich(dst_ips)
+        other_ips = {key[2] for key in groups}
+        self.geoip.enrich(other_ips)
 
         now = int(time.time())
         rows = [
             {
-                "ts": now, "src_ip": src_ip, "customer_prefix": resolve_customer_prefix(src_ip, self.customers),
-                "src_port": src_port, "dst_ip": dst_ip, "dst_port": dst_port, "protocol": protocol,
+                "ts": now, "src_ip": client_ip, "customer_prefix": g["customer_prefix"],
+                "src_port": client_port, "dst_ip": other_ip, "dst_port": other_port, "protocol": protocol,
                 "bytes": g["bytes"], "packets": g["packets"],
-                "dst_asn": self.geoip.lookup(dst_ip)[0], "dst_country": self.geoip.lookup(dst_ip)[1],
+                "dst_asn": self.geoip.lookup(other_ip)[0], "dst_country": self.geoip.lookup(other_ip)[1],
             }
-            for (src_ip, src_port, dst_ip, dst_port, protocol), g in groups.items()
+            for (client_ip, client_port, other_ip, other_port, protocol), g in groups.items()
         ]
-        if rows:
+        # gate em `records` (houve captura no ciclo), não em `rows` (houve flow atribuível
+        # a cliente) — senão um ciclo onde TODO flow capturado é descartado por não bater
+        # com nenhum cliente cadastrado (customers.yaml vazio/corrompido, ou só tráfego de
+        # trânsito na janela) vira um apagão silencioso: nem loga o ciclo nem roda detecção,
+        # e não há nenhum sinal pro operador perceber que a detecção parou.
+        if records:
             with self.db_lock:
-                storage.insert_client_flow_aggs_batch(self.conn, rows)
+                if rows:
+                    storage.insert_client_flow_aggs_batch(self.conn, rows)
                 LOG.info(
-                    "agregação: %d flows -> %d grupos (src_ip,src_port,dst_ip,dst_port,protocolo)",
+                    "agregação: %d flows -> %d grupos (src_ip,src_port,dst_ip,dst_port,protocolo)%s",
                     len(records), len(groups),
+                    f", {skipped} sem cliente identificado" if skipped else "",
                 )
-            detector.run_all(self.conn, self.config, self.whitelist, self.ai_client, self.threat_feed,
-                              self.db_lock)
+            detector.run_all(self.conn, self.config, self.whitelist, customers=self.customers,
+                              ai_client=self.ai_client, threat_feed=self.threat_feed, db_lock=self.db_lock)
 
         self._cycle_count += 1
         interval = self.config["database"]["aggregate_interval_s"]

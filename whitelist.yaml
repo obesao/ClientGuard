@@ -1,4 +1,10 @@
 # whitelist.yaml — src_ip/prefixos que NUNCA devem gerar alerta no ClientGuard
 # (servidores de e-mail/DNS/NTP legítimos de clientes corporativos, backups, etc.)
-# Editável diretamente ou via: clientguard-cli whitelist add|del <ip>
+# Entradas em CIDR (bloco inteiro) são suportadas — ver WhitelistMatcher em
+# customer_registry.py. Editável diretamente ou via: clientguard-cli whitelist add|del <ip>
 - 177.86.16.36
+# appliances de cache de CDN dentro de 177.86.17.0/24 — não são clientes; o alto fan-out
+# de sincronização de conteúdo é comportamento normal desses appliances, não scan/coordenação
+- 177.86.17.0/27    # CDN-GOOGLE
+- 177.86.17.40/29   # CDN-NETFLIX
+- 177.86.17.48/29   # CDN-GLOBO

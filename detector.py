@@ -58,35 +58,87 @@ def _record_signal(conn: sqlite3.Connection, src_ip: str, customer_prefix: str |
                 storage.mark_notified(conn, signal_id)
 
 
+def _scaled_threshold(base: float, customer_prefix: str | None, multipliers: dict) -> float:
+    """Escala base pelo client_multiplier do prefixo (customers.yaml) — 1 IP visível de
+    um pool CGNAT representa várias identidades reais combinadas, então o limiar/volume
+    "normal" de 1 cliente não vale pra ele. Sem multiplicador cadastrado (a maioria dos
+    prefixos), retorna base sem mudança."""
+    return base * multipliers.get(customer_prefix, 1)
+
+
+def _group_scaled_threshold(base: float, group_prefixes, multipliers: dict) -> float:
+    """Mesma escala de _scaled_threshold, mas pra um grupo com vários clientes (ex.:
+    coordinated_destination) — usa o maior multiplicador entre os participantes, já que
+    basta 1 deles estar atrás de CGNAT pra o grupo poder ser só sobreposição de população
+    normal, não coordenação de verdade."""
+    return base * max((multipliers.get(p, 1) for p in group_prefixes), default=1)
+
+
 def detect_scan_horizontal(conn: sqlite3.Connection, window_s: int, threshold: int, whitelist: set,
-                            webhook_url: str = "", ai_client=None, db_lock=None) -> None:
-    """1 src_ip -> N dst_ip distintos, mesma dst_port -> varredura horizontal (reconhecimento)."""
+                            exclude_ports: list[int] = (), multipliers: dict = None,
+                            max_avg_bytes: float = None, webhook_url: str = "", ai_client=None,
+                            db_lock=None) -> None:
+    """1 src_ip -> N dst_ip distintos, mesma dst_port -> varredura horizontal (reconhecimento).
+
+    exclude_ports precisa cobrir portas de web/CDN (443/80) — sem isso, qualquer navegação
+    normal (uma página com dezenas de IPs de borda de CDN) bate o limiar e é indistinguível
+    de reconhecimento de rede de verdade.
+
+    multipliers (customer_prefix -> fator) escala o limiar efetivo pra prefixos onde um
+    único src_ip visível representa várias identidades reais combinadas (ex.: pool de
+    CGNAT, onde 1 IP externo = até dezenas de clientes reais) — sem isso, o volume/
+    diversidade combinado de todo mundo atrás do NAT bate o limiar pensado pra 1 cliente.
+    A query usa o threshold base como piso (mais barato); o filtro fino por multiplicador
+    é feito em Python, já que o fator varia por linha.
+
+    max_avg_bytes filtra tráfego P2P/torrent (muitos hosts distintos, mas com volume real
+    de dados por destino) — scan de reconhecimento de verdade manda pacotes pequenos de
+    sonda, não centenas de KB por alvo. None desativa o filtro (compara qualquer volume)."""
+    multipliers = multipliers or {}
     lock = db_lock or nullcontext()
     since = int(time.time()) - window_s
+    query = """SELECT src_ip, customer_prefix, dst_port, COUNT(DISTINCT dst_ip) AS n_hosts,
+                      SUM(bytes) AS total_bytes
+               FROM client_flow_aggs WHERE ts >= ?"""
+    params: list = [since]
+    if exclude_ports:
+        query += f" AND dst_port NOT IN ({','.join('?' * len(exclude_ports))})"
+        params.extend(exclude_ports)
+    query += " GROUP BY src_ip, dst_port HAVING n_hosts >= ?"
+    params.append(threshold)
     with lock:
-        rows = conn.execute(
-            """SELECT src_ip, customer_prefix, dst_port, COUNT(DISTINCT dst_ip) AS n_hosts
-               FROM client_flow_aggs WHERE ts >= ?
-               GROUP BY src_ip, dst_port HAVING n_hosts >= ?""",
-            (since, threshold),
-        ).fetchall()
+        rows = conn.execute(query, params).fetchall()
     for r in rows:
         if r["src_ip"] in whitelist:
             continue
+        effective = _scaled_threshold(threshold, r["customer_prefix"], multipliers)
+        if r["n_hosts"] < effective:
+            continue
+        avg_bytes = r["total_bytes"] / r["n_hosts"]
+        if max_avg_bytes is not None and avg_bytes > max_avg_bytes:
+            continue
         _record_signal(conn, r["src_ip"], r["customer_prefix"], "port_scan_horizontal",
-                        min(1.0, r["n_hosts"] / (threshold * 2)),
-                        {"dst_port": r["dst_port"], "n_hosts": r["n_hosts"], "window_s": window_s},
+                        min(1.0, r["n_hosts"] / (effective * 2)),
+                        {"dst_port": r["dst_port"], "n_hosts": r["n_hosts"], "avg_bytes": round(avg_bytes),
+                         "window_s": window_s},
                         webhook_url, ai_client, db_lock)
 
 
 def detect_scan_vertical(conn: sqlite3.Connection, window_s: int, threshold: int, whitelist: set,
-                          webhook_url: str = "", ai_client=None, db_lock=None) -> None:
-    """1 src_ip -> N dst_port distintas, mesmo dst_ip -> varredura de vulnerabilidade."""
+                          multipliers: dict = None, max_avg_bytes: float = None, webhook_url: str = "",
+                          ai_client=None, db_lock=None) -> None:
+    """1 src_ip -> N dst_port distintas, mesmo dst_ip -> varredura de vulnerabilidade.
+
+    multipliers escala o limiar pra prefixos CGNAT — ver docstring de detect_scan_horizontal.
+    max_avg_bytes filtra P2P/torrent (muitas portas, mas volume real por porta) — mesmo
+    raciocínio de detect_scan_horizontal."""
+    multipliers = multipliers or {}
     lock = db_lock or nullcontext()
     since = int(time.time()) - window_s
     with lock:
         rows = conn.execute(
-            """SELECT src_ip, customer_prefix, dst_ip, COUNT(DISTINCT dst_port) AS n_ports
+            """SELECT src_ip, customer_prefix, dst_ip, COUNT(DISTINCT dst_port) AS n_ports,
+                      SUM(bytes) AS total_bytes
                FROM client_flow_aggs WHERE ts >= ?
                GROUP BY src_ip, dst_ip HAVING n_ports >= ?""",
             (since, threshold),
@@ -94,17 +146,28 @@ def detect_scan_vertical(conn: sqlite3.Connection, window_s: int, threshold: int
     for r in rows:
         if r["src_ip"] in whitelist:
             continue
+        effective = _scaled_threshold(threshold, r["customer_prefix"], multipliers)
+        if r["n_ports"] < effective:
+            continue
+        avg_bytes = r["total_bytes"] / r["n_ports"]
+        if max_avg_bytes is not None and avg_bytes > max_avg_bytes:
+            continue
         _record_signal(conn, r["src_ip"], r["customer_prefix"], "port_scan_vertical",
-                        min(1.0, r["n_ports"] / (threshold * 2)),
-                        {"dst_ip": r["dst_ip"], "n_ports": r["n_ports"], "window_s": window_s},
+                        min(1.0, r["n_ports"] / (effective * 2)),
+                        {"dst_ip": r["dst_ip"], "n_ports": r["n_ports"], "avg_bytes": round(avg_bytes),
+                         "window_s": window_s},
                         webhook_url, ai_client, db_lock)
 
 
 def detect_amplifier(conn: sqlite3.Connection, window_s: int, ports: list[int], min_bps: float,
-                      whitelist: set, webhook_url: str = "", ai_client=None, db_lock=None) -> None:
+                      whitelist: set, multipliers: dict = None, webhook_url: str = "", ai_client=None,
+                      db_lock=None) -> None:
     """src_ip do cliente respondendo (src_port em porta de serviço UDP conhecida) pra
     vários destinos externos em volume alto -> resolver/serviço aberto sendo abusado
-    como refletor de amplificação."""
+    como refletor de amplificação.
+
+    multipliers escala min_bps pra prefixos CGNAT — ver docstring de detect_scan_horizontal."""
+    multipliers = multipliers or {}
     lock = db_lock or nullcontext()
     since = int(time.time()) - window_s
     placeholders = ",".join("?" * len(ports))
@@ -120,18 +183,23 @@ def detect_amplifier(conn: sqlite3.Connection, window_s: int, ports: list[int], 
         if r["src_ip"] in whitelist or r["n_dst"] < 2:
             continue
         bps = (r["total_bytes"] * 8) / window_s
-        if bps < min_bps:
+        effective_min_bps = _scaled_threshold(min_bps, r["customer_prefix"], multipliers)
+        if bps < effective_min_bps:
             continue
         _record_signal(conn, r["src_ip"], r["customer_prefix"], "amplifier_hosted",
-                        min(1.0, bps / (min_bps * 4)),
+                        min(1.0, bps / (effective_min_bps * 4)),
                         {"src_port": r["src_port"], "bps": round(bps), "n_dst": r["n_dst"], "window_s": window_s},
                         webhook_url, ai_client, db_lock)
 
 
 def detect_spam(conn: sqlite3.Connection, window_s: int, spam_ports: list[int], min_distinct_dest: int,
-                 whitelist: set, webhook_url: str = "", ai_client=None, db_lock=None) -> None:
+                 whitelist: set, multipliers: dict = None, webhook_url: str = "", ai_client=None,
+                 db_lock=None) -> None:
     """src_ip do cliente com TCP outbound em porta de e-mail (25/465/587) pra muitos
-    destinos distintos -> host comprometido enviando spam."""
+    destinos distintos -> host comprometido enviando spam.
+
+    multipliers escala o limiar pra prefixos CGNAT — ver docstring de detect_scan_horizontal."""
+    multipliers = multipliers or {}
     lock = db_lock or nullcontext()
     since = int(time.time()) - window_s
     placeholders = ",".join("?" * len(spam_ports))
@@ -145,8 +213,11 @@ def detect_spam(conn: sqlite3.Connection, window_s: int, spam_ports: list[int], 
     for r in rows:
         if r["src_ip"] in whitelist:
             continue
+        effective = _scaled_threshold(min_distinct_dest, r["customer_prefix"], multipliers)
+        if r["n_dst"] < effective:
+            continue
         _record_signal(conn, r["src_ip"], r["customer_prefix"], "spam_bot",
-                        min(1.0, r["n_dst"] / (min_distinct_dest * 2)),
+                        min(1.0, r["n_dst"] / (effective * 2)),
                         {"n_dst": r["n_dst"], "window_s": window_s}, webhook_url, ai_client, db_lock)
 
 
@@ -179,13 +250,21 @@ def detect_malicious_contact(conn: sqlite3.Connection, window_s: int, threat_fee
 
 
 def detect_shared_destination(conn: sqlite3.Connection, window_s: int, min_distinct_clients: int,
-                               exclude_ports: list[int], whitelist: set, webhook_url: str = "",
-                               ai_client=None, db_lock=None) -> None:
+                               exclude_ports: list[int], whitelist: set, multipliers: dict = None,
+                               webhook_url: str = "", ai_client=None, db_lock=None) -> None:
     """N clientes distintos (>= min_distinct_clients) falando com o MESMO dst_ip:dst_port
     fora das portas web/DNS comuns (exclude_ports, tráfego normal de internet faz isso o
     tempo todo em CDN/HTTPS/DNS) -> indício de C2/botnet coordenado atingindo vários
     clientes ao mesmo tempo. Diferente dos outros detectores, que olham 1 src_ip por vez,
-    este correlaciona entre clientes."""
+    este correlaciona entre clientes.
+
+    multipliers (customer_prefix -> fator) eleva o limiar do grupo inteiro quando qualquer
+    cliente envolvido está atrás de CGNAT — um punhado de IPs visíveis de um pool CGNAT
+    convergindo pra um destino popular não é o mesmo indício de coordenação que o mesmo
+    número de clientes com IP próprio, já que cada IP do pool já é várias identidades reais
+    combinadas. A query usa min_distinct_clients como piso; o limiar efetivo por grupo é
+    recalculado em Python depois de saber quais clientes participaram."""
+    multipliers = multipliers or {}
     lock = db_lock or nullcontext()
     since = int(time.time()) - window_s
     placeholders = ",".join("?" * len(exclude_ports))
@@ -203,12 +282,16 @@ def detect_shared_destination(conn: sqlite3.Connection, window_s: int, min_disti
                    WHERE ts >= ? AND dst_ip = ? AND dst_port = ?""",
                 (since, g["dst_ip"], g["dst_port"]),
             ).fetchall()
+        effective = _group_scaled_threshold(min_distinct_clients, (c["customer_prefix"] for c in clients),
+                                             multipliers)
+        if g["n_clients"] < effective:
+            continue
         client_ips = [c["src_ip"] for c in clients]
         for c in clients:
             if c["src_ip"] in whitelist:
                 continue
             _record_signal(conn, c["src_ip"], c["customer_prefix"], "coordinated_destination",
-                            min(1.0, g["n_clients"] / (min_distinct_clients * 2)),
+                            min(1.0, g["n_clients"] / (effective * 2)),
                             {"dst_ip": g["dst_ip"], "dst_port": g["dst_port"], "n_clients": g["n_clients"],
                              "other_clients": [ip for ip in client_ips if ip != c["src_ip"]][:10],
                              "window_s": window_s},
@@ -216,11 +299,18 @@ def detect_shared_destination(conn: sqlite3.Connection, window_s: int, min_disti
 
 
 def detect_dns_tunneling(conn: sqlite3.Connection, window_s: int, min_queries: int, whitelist: set,
-                          webhook_url: str = "", ai_client=None, db_lock=None) -> None:
+                          multipliers: dict = None, webhook_url: str = "", ai_client=None,
+                          db_lock=None) -> None:
     """src_ip do cliente faz um volume alto de queries DNS (muitos pacotes pequenos, não
     poucos grandes — diferente do amplifier_hosted, que é sobre volume de RESPOSTA) pro
     MESMO servidor externo -> indício de túnel DNS/exfiltração via subdomínios codificados,
-    não uso normal de navegação (que gera dezenas de queries por janela, não centenas)."""
+    não uso normal de navegação (que gera dezenas de queries por janela, não centenas).
+
+    multipliers escala o limiar pra prefixos CGNAT — ver docstring de detect_scan_horizontal.
+    Volume de DNS combinado de várias pessoas atrás do mesmo IP visível pode passar do
+    limiar pensado pra 1 cliente sem que ninguém esteja de fato tunelando (distinguível de
+    túnel real pelo avg_pkt_bytes: normal fica pequeno, tunelamento estufa o pacote)."""
+    multipliers = multipliers or {}
     lock = db_lock or nullcontext()
     since = int(time.time()) - window_s
     with lock:
@@ -233,28 +323,38 @@ def detect_dns_tunneling(conn: sqlite3.Connection, window_s: int, min_queries: i
     for r in rows:
         if r["src_ip"] in whitelist:
             continue
+        effective = _scaled_threshold(min_queries, r["customer_prefix"], multipliers)
+        if r["n_queries"] < effective:
+            continue
         avg_pkt_bytes = round(r["total_bytes"] / r["n_queries"]) if r["n_queries"] else 0
         _record_signal(conn, r["src_ip"], r["customer_prefix"], "dns_tunneling",
-                        min(1.0, r["n_queries"] / (min_queries * 2)),
+                        min(1.0, r["n_queries"] / (effective * 2)),
                         {"dst_ip": r["dst_ip"], "n_queries": r["n_queries"], "avg_pkt_bytes": avg_pkt_bytes,
                          "window_s": window_s},
                         webhook_url, ai_client, db_lock)
 
 
-def run_all(conn: sqlite3.Connection, config: dict, whitelist: set, ai_client=None, threat_feed=None,
-            db_lock=None) -> None:
+def run_all(conn: sqlite3.Connection, config: dict, whitelist: set, customers: list[dict] = (),
+            ai_client=None, threat_feed=None, db_lock=None) -> None:
     det = config["detection"]
     webhook_url = config.get("alerts", {}).get("webhook_url", "")
+    # customer_prefix -> fator: quantas identidades reais um único src_ip visível daquele
+    # prefixo pode representar (ex.: pool de CGNAT). Default implícito é 1 (sem ajuste).
+    multipliers = {c["prefix"]: c["client_multiplier"] for c in customers
+                   if c.get("prefix") and c.get("client_multiplier")}
+    max_avg_bytes = det.get("scan_max_avg_bytes")
     detect_scan_horizontal(conn, det["window_s"], det["scan_horizontal_hosts"], whitelist,
+                            det["common_service_ports"], multipliers, max_avg_bytes,
                             webhook_url, ai_client, db_lock)
     detect_scan_vertical(conn, det["window_s"], det["scan_vertical_ports"], whitelist,
-                          webhook_url, ai_client, db_lock)
+                          multipliers, max_avg_bytes, webhook_url, ai_client, db_lock)
     detect_amplifier(conn, det["window_s"], det["amplifier_ports"], det["amplifier_min_bps"], whitelist,
-                      webhook_url, ai_client, db_lock)
+                      multipliers, webhook_url, ai_client, db_lock)
     detect_spam(conn, det["window_s"], det["spam_ports"], det["spam_min_distinct_dest"], whitelist,
-                webhook_url, ai_client, db_lock)
+                multipliers, webhook_url, ai_client, db_lock)
     detect_malicious_contact(conn, det["window_s"], threat_feed, whitelist, webhook_url, ai_client, db_lock)
     detect_shared_destination(conn, det["window_s"], det["coordinated_min_clients"],
-                               det["coordinated_exclude_ports"], whitelist, webhook_url, ai_client, db_lock)
+                               det["common_service_ports"], whitelist, multipliers,
+                               webhook_url, ai_client, db_lock)
     detect_dns_tunneling(conn, det["window_s"], det["dns_tunneling_min_queries"], whitelist,
-                          webhook_url, ai_client, db_lock)
+                          multipliers, webhook_url, ai_client, db_lock)
