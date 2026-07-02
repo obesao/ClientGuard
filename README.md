@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.5.0**
+**Versão atual: v1.5.1**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -89,6 +89,12 @@ clientguard-cli customers add|del <network> <prefix>
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.5.1 — 2026-07-02 — Renumeração do link com o roteador de borda
+- IP do link ponto-a-ponto com o roteador de borda mudou; comentário de
+  `capture.iface` em `config.yaml` (que explica por que sniffar em `lo`)
+  atualizado pro novo endereço — comportamento de captura não muda, o
+  tráfego pra qualquer IP local segue roteando via loopback.
 
 ### v1.5.0 — 2026-07-01 — Backend de consumo de dados por cliente (série temporal + top destinos)
 - `storage.py`: `client_usage_timeseries` (bytes/bps bucketizados por tempo) e

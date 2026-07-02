@@ -4,8 +4,8 @@ daemon:
   socket: /var/run/clientguard.sock   # socket de controle consumido pelo clientguard-cli
 
 capture:
-  iface: lo   # tráfego pra 10.77.77.21:2055 é endereço local do próprio host — o kernel
-              # roteia via loopback (confirmado com `ip route get 10.77.77.21`), nunca
+  iface: lo   # tráfego pra 10.77.10.2:2055 é endereço local do próprio host — o kernel
+              # roteia via loopback (confirmado com `ip route get 10.77.10.2`), nunca
               # aparece na interface física ens18. Sniffar em "lo" é o ponto certo.
   bpf_filter: "udp port 2055"   # mesmo tráfego que já chega pro FlowGuard, só observado
   sampling_rate: 1000            # mesmo valor do NE8000 usado pelo FlowGuard (collector.sampling_rate)
