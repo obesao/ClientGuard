@@ -1,5 +1,7 @@
 # ClientGuard
 
+**Versão atual: v1.1.0**
+
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor POX Network.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
 (sem competir pelo socket dele, sem tocar em nenhum arquivo daquele projeto), agrega por
@@ -79,7 +81,7 @@ clientguard-cli customers add|del <network> <prefix>
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
 
-### 2026-07-01 — CLI, alertas, IA, portal e detectores de correlação/reputação/DNS
+### v1.1.0 — 2026-07-01 — CLI, alertas, IA, portal e detectores de correlação/reputação/DNS
 - Socket de controle + `clientguard-cli.py`.
 - `customers.yaml` migrado de IP exato para CIDR (`network`).
 - Cadastradas as redes `177.86.16.0/21` (em 8×`/24`) e `100.64.0.0/10` (CGNAT A10).
@@ -95,12 +97,12 @@ por quê" de cada leva de trabalho.
 - Aba ClientGuard no portal web (repositório separado).
 - Publicado no GitHub.
 
-### 2026-07-01 — Serviço systemd
+### v1.0.1 — 2026-07-01 — Serviço systemd
 - `clientguard.service`, reinício automático, correção da interface de captura
   (`lo`, tráfego pra IP local roteado via loopback).
 
-### 2026-06-30/07-01 — Detectores de esforço baixo (v1)
+### v1.0.0 — 2026-06-30/07-01 — Detectores de esforço baixo
 - `port_scan_horizontal`, `port_scan_vertical`, `amplifier_hosted`, `spam_bot`.
 
-### 2026-06-30 — Snapshot inicial
+### v0.1.0 — 2026-06-30 — Snapshot inicial
 - Coletor mínimo (captura passiva via scapy), schema SQLite agregado por `src_ip`.
