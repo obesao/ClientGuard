@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.4.0**
+**Versão atual: v1.5.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -89,6 +89,23 @@ clientguard-cli customers add|del <network> <prefix>
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.5.0 — 2026-07-01 — Backend de consumo de dados por cliente (série temporal + top destinos)
+- `storage.py`: `client_usage_timeseries` (bytes/bps bucketizados por tempo) e
+  `client_top_destinations` (top dst_ip/porta/protocolo, já com ASN/país do
+  GeoIP) — as duas usam `idx_client_flow_src (src_ip, ts)` existente, sem
+  precisar de índice novo (confirmado com `EXPLAIN QUERY PLAN`).
+- `socket_server.py`: comando novo `client_detail` (src_ip + window_s),
+  bucket da série temporal escala com a janela (60s/5min/15min/1h).
+- **Achado de performance**: `top_src_ips` numa janela de 7 dias levou ~0,9s
+  com os dados reais atuais (agregação por `src_ip` sobre toda a retenção).
+  Testei um índice de cobertura `(ts, src_ip, bytes, packets)` — **não ajudou**
+  (mesmo tempo, o custo é inerente a tocar toda linha da janela pra agregar,
+  não tem índice que evite isso). Não adicionei o índice; aceito como latência
+  de uma consulta sob demanda (não é chamada em loop de polling).
+- Suporta a aba "Top Clientes por Consumo de Dados" no portal (repositório do
+  portal): tabela com janela 1h/6h/24h/7d + detalhe por cliente (gráfico de
+  tráfego ao longo do tempo, top destinos).
 
 ### v1.4.0 — 2026-07-01 — CI no GitHub Actions
 - `customer_registry.py` (novo) — `resolve_customer_prefix` extraído de

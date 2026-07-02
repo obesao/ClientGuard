@@ -33,6 +33,18 @@ CUSTOMERS_HEADER = (
 )
 
 
+def _bucket_for_window(window_s: int) -> int:
+    """Tamanho do bucket da série temporal — escala com a janela pra manter a
+    contagem de pontos do gráfico razoável (dezenas a ~170, não milhares)."""
+    if window_s <= 3600:
+        return 60
+    if window_s <= 21600:
+        return 300
+    if window_s <= 86400:
+        return 900
+    return 3600
+
+
 class _RequestHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
         try:
@@ -107,6 +119,18 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         with d.db_lock:
             top = storage.top_src_ips(d.conn, window_s, limit)
         return {"ok": True, "top": top}
+
+    def _cmd_client_detail(self, request: dict) -> dict:
+        src_ip = request.get("src_ip")
+        if not src_ip:
+            return {"ok": False, "error": "src_ip obrigatório"}
+        d = self.daemon_ref
+        window_s = int(request.get("window_s") or d.config["database"]["aggregate_interval_s"])
+        bucket_s = _bucket_for_window(window_s)
+        with d.db_lock:
+            timeseries = storage.client_usage_timeseries(d.conn, src_ip, window_s, bucket_s)
+            top_destinations = storage.client_top_destinations(d.conn, src_ip, window_s, limit=10)
+        return {"ok": True, "timeseries": timeseries, "top_destinations": top_destinations}
 
     def _cmd_suspicious(self, request: dict) -> dict:
         d = self.daemon_ref

@@ -200,3 +200,29 @@ def save_geoip_batch(conn: sqlite3.Connection, entries: list[tuple[str, int | No
         [(ip, asn, country, now) for ip, asn, country in entries],
     )
     conn.commit()
+
+
+def client_usage_timeseries(conn: sqlite3.Connection, src_ip: str, window_s: int, bucket_s: int) -> list[dict]:
+    """Série temporal de tráfego (bps) de UM cliente — usa idx_client_flow_src
+    (src_ip, ts), equality+range, sem precisar de índice novo."""
+    since = int(time.time()) - window_s
+    rows = conn.execute(
+        """SELECT (ts / ?) * ? AS bucket, SUM(bytes) AS bytes
+           FROM client_flow_aggs WHERE src_ip = ? AND ts >= ?
+           GROUP BY bucket ORDER BY bucket""",
+        (bucket_s, bucket_s, src_ip, since),
+    ).fetchall()
+    return [{"ts": r["bucket"], "bps": (r["bytes"] * 8) / bucket_s} for r in rows]
+
+
+def client_top_destinations(conn: sqlite3.Connection, src_ip: str, window_s: int, limit: int = 10) -> list[dict]:
+    since = int(time.time()) - window_s
+    rows = conn.execute(
+        """SELECT dst_ip, dst_port, protocol, dst_asn, dst_country,
+                  SUM(bytes) AS bytes, SUM(packets) AS packets
+           FROM client_flow_aggs WHERE src_ip = ? AND ts >= ?
+           GROUP BY dst_ip, dst_port, protocol
+           ORDER BY bytes DESC LIMIT ?""",
+        (src_ip, since, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
