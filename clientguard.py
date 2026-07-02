@@ -22,6 +22,7 @@ from collector.netflow import parse_packet, TemplateStore  # noqa: E402
 import ai_client
 import configio
 import detector
+import edge_mitigation
 import geoip
 import socket_server
 import storage
@@ -43,6 +44,8 @@ class ClientGuardDaemon:
         self.customers = configio.load_yaml_list(self.config["customer_registry"])
         self.whitelist = WhitelistMatcher(configio.load_yaml_list(self.config["whitelist_file"]))
         self.toggles = configio.load_feature_toggles(self.config.get("feature_toggles_file", ""))
+        self.edge_cfg = edge_mitigation.load_config(
+            self.config.get("edge_mitigation_file", edge_mitigation.DEFAULT_CONFIG_PATH))
         self.ai_client = ai_client.AIClient(self.config.get("ai", {}))
         self.threat_feed = threat_feed.ThreatFeed(self.config.get("threat_feed", {}).get("cache_file", ""))
         self.geoip = geoip.GeoIPCache(self.conn, self.db_lock)
@@ -55,6 +58,8 @@ class ClientGuardDaemon:
         self.customers = configio.load_yaml_list(self.config["customer_registry"])
         self.whitelist = WhitelistMatcher(configio.load_yaml_list(self.config["whitelist_file"]))
         self.toggles = configio.load_feature_toggles(self.config.get("feature_toggles_file", ""))
+        self.edge_cfg = edge_mitigation.load_config(
+            self.config.get("edge_mitigation_file", edge_mitigation.DEFAULT_CONFIG_PATH))
         LOG.info("config recarregado: %d clientes cadastrados, %d na whitelist, toggles=%s",
                  len(self.customers), len(self.whitelist), self.toggles)
 
@@ -152,7 +157,12 @@ class ClientGuardDaemon:
                 )
             detector.run_all(self.conn, self.config, self.whitelist, customers=self.customers,
                               ai_client=self.ai_client, threat_feed=self.threat_feed, db_lock=self.db_lock,
-                              toggles=self.toggles)
+                              toggles=self.toggles, edge_cfg=self.edge_cfg)
+
+        flowguard_path = self.config.get("flowguard_reuse", {}).get("path", "/root/flowguard")
+        expired = edge_mitigation.expire_due(self.conn, self.db_lock, self.edge_cfg, flowguard_path)
+        if expired:
+            LOG.info("mitigação de borda: %d regra(s) revertida(s) por TTL vencido", expired)
 
         self._cycle_count += 1
         interval = self.config["database"]["aggregate_interval_s"]

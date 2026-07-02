@@ -47,6 +47,21 @@ CREATE TABLE IF NOT EXISTS geoip_cache (
   ts      INTEGER NOT NULL
 );
 
+-- Mitigação direta na borda (SSH/ACL no roteador) por src_ip — trilha própria,
+-- separada de suspicious_clients, porque uma mitigação pode ser reaplicada/estendida
+-- (mesmo IP, TTL renovado) sem abrir um novo sinal de detecção.
+CREATE TABLE IF NOT EXISTS edge_mitigations (
+  id           INTEGER PRIMARY KEY,
+  signal_id    INTEGER,
+  src_ip       TEXT NOT NULL,
+  ts_applied   INTEGER NOT NULL,
+  ts_expires   INTEGER,
+  ts_reverted  INTEGER,
+  status       TEXT NOT NULL DEFAULT 'active',   -- 'active' | 'reverted' | 'failed'
+  trigger_type TEXT NOT NULL DEFAULT 'manual',   -- 'auto' | 'manual'
+  error        TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_client_flow_ts ON client_flow_aggs(ts);
 CREATE INDEX IF NOT EXISTS idx_client_flow_src ON client_flow_aggs(src_ip, ts);
 -- dst_ip líder: serve tanto o lookup exato (dst_ip, dst_port) do detect_shared_destination
@@ -56,6 +71,7 @@ CREATE INDEX IF NOT EXISTS idx_client_flow_src ON client_flow_aggs(src_ip, ts);
 -- DISTINCT sobre o resultado de uma SEARCH por ts, não por dst_ip).
 CREATE INDEX IF NOT EXISTS idx_client_flow_dst ON client_flow_aggs(dst_ip, dst_port, ts);
 CREATE INDEX IF NOT EXISTS idx_suspicious_open ON suspicious_clients(src_ip, signal_type, resolved);
+CREATE INDEX IF NOT EXISTS idx_edge_mitigations_status ON edge_mitigations(status, src_ip);
 """
 
 
@@ -222,6 +238,66 @@ def client_usage_timeseries(conn: sqlite3.Connection, src_ip: str, window_s: int
         (bucket_s, bucket_s, src_ip, since),
     ).fetchall()
     return [{"ts": r["bucket"], "bps": (r["bytes"] * 8) / bucket_s} for r in rows]
+
+
+# --- mitigação direta na borda (SSH/ACL) ----------------------------------
+
+def insert_edge_mitigation(conn: sqlite3.Connection, src_ip: str, signal_id: int | None,
+                            ttl_s: int | None, trigger_type: str) -> int:
+    now = int(time.time())
+    ts_expires = now + ttl_s if ttl_s else None
+    cur = conn.execute(
+        """INSERT INTO edge_mitigations (signal_id, src_ip, ts_applied, ts_expires, status, trigger_type)
+           VALUES (?, ?, ?, ?, 'active', ?)""",
+        (signal_id, src_ip, now, ts_expires, trigger_type),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_active_edge_mitigation(conn: sqlite3.Connection, src_ip: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM edge_mitigations WHERE src_ip = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+        (src_ip,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_edge_mitigation(conn: sqlite3.Connection, mitigation_id: int) -> dict | None:
+    row = conn.execute("SELECT * FROM edge_mitigations WHERE id = ?", (mitigation_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def extend_edge_mitigation(conn: sqlite3.Connection, mitigation_id: int, ttl_s: int | None) -> None:
+    ts_expires = int(time.time()) + ttl_s if ttl_s else None
+    conn.execute("UPDATE edge_mitigations SET ts_expires = ? WHERE id = ?", (ts_expires, mitigation_id))
+    conn.commit()
+
+
+def list_edge_mitigations(conn: sqlite3.Connection, active_only: bool = False) -> list[dict]:
+    query = "SELECT * FROM edge_mitigations"
+    if active_only:
+        query += " WHERE status = 'active'"
+    query += " ORDER BY ts_applied DESC"
+    rows = conn.execute(query).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_due_edge_mitigations(conn: sqlite3.Connection) -> list[dict]:
+    now = int(time.time())
+    rows = conn.execute(
+        "SELECT * FROM edge_mitigations WHERE status = 'active' AND ts_expires IS NOT NULL AND ts_expires <= ?",
+        (now,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_edge_reverted(conn: sqlite3.Connection, mitigation_id: int, error: str | None = None) -> None:
+    conn.execute(
+        "UPDATE edge_mitigations SET status = ?, ts_reverted = ?, error = ? WHERE id = ?",
+        ("failed" if error else "reverted", int(time.time()), error, mitigation_id),
+    )
+    conn.commit()
 
 
 def client_top_destinations(conn: sqlite3.Connection, src_ip: str, window_s: int, limit: int = 10) -> list[dict]:

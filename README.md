@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.11.0**
+**Versão atual: v1.12.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -68,8 +68,9 @@ comprometidos (scan, spam, amplificação, C2, exfiltração).
 | `ai_client.py` | Explicação de sinais via Claude |
 | `threat_feed.py` | Feed de reputação de IPs maliciosos |
 | `geoip.py` | Enriquecimento ASN/país via Team Cymru |
+| `edge_mitigation.py` | Mitigação direta na borda via SSH (ACL) — dirigida por sinal, gatilho automático opcional |
 | `tools/synth_client_flows.py` | Gerador de NetFlow sintético para testar os detectores |
-| `tests/` | Suíte pytest (92 testes) — detectores, storage, configio, threat feed, geoip |
+| `tests/` | Suíte pytest (126 testes) — detectores, storage, configio, threat feed, geoip, socket, mitigação de borda |
 
 ## Testes
 
@@ -95,6 +96,44 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.12.0 — 2026-07-02 — Mitigação direta na borda (SSH/ACL), sem depender do FlowGuard
+- Até aqui o único jeito de bloquear um cliente abusivo era `block_add`/`del`/
+  `list`: um proxy fino pro socket do FlowGuard, que anuncia uma regra FlowSpec
+  via BGP — depende da sessão BGP do FlowGuard com o roteador estar de pé. Novo
+  módulo `edge_mitigation.py` conecta via SSH (Netmiko) direto no roteador de
+  borda e insere/remove uma regra de ACL por IP de origem — caminho
+  independente, útil quando a sessão BGP está fora do ar ou como alternativa
+  mais cirúrgica ao bloqueio via FlowSpec.
+- Reaproveita a lista de equipamentos/credenciais já cadastrada no "Modo
+  Guerra" do FlowGuard (`warmode.yaml`) por nome de equipamento
+  (`warmode_device` em `edge_mitigation.yaml`) — evita duplicar senha SSH do
+  mesmo roteador em dois lugares. A técnica (ACL, não comando EXEC livre) e o
+  gatilho por sinal são exclusivos do ClientGuard.
+- `acl_number`/`apply_commands`/`revert_commands` em `edge_mitigation.yaml`
+  são um template (`{ip}`/`{acl_number}` substituídos a cada chamada) —
+  ajustar a sintaxe exata e o número do ACL real antes de habilitar em
+  produção; só editável direto no arquivo (não exposto por portal/CLI), pra
+  não abrir um canal de injeção de comando arbitrário via formulário web.
+- Gatilho automático por tipo de detector (`auto_mitigate` em
+  `edge_mitigation.yaml`) — desabilitado por padrão em todos os 7 detectores
+  (opt-in explícito), editável via `clientguard-cli edge auto set` ou pelo
+  portal. Disparo em thread separada (fire-and-forget) pra não travar o ciclo
+  de agregação esperando uma conexão SSH.
+- Idempotente: aplicar numa origem que já tem mitigação ativa só estende o
+  TTL, não empilha regra duplicada no ACL. TTL vencido é revertido sozinho a
+  cada ciclo de agregação (`edge_mitigation.expire_due`, mesmo princípio do
+  `ttl_s` que já existia no bloqueio via FlowSpec).
+- Novo comando de socket `edge_apply`/`edge_revert`/`edge_list`/`edge_config`/
+  `edge_set_auto`, subcomando `clientguard-cli edge apply|revert|list|auto`, e
+  seção "Mitigação na borda" no portal (aplicar por linha na tabela de sinais
+  suspeitos, tabela de mitigações ativas/histórico, config dos gatilhos
+  automáticos).
+- `netmiko`/`paramiko` novos em `requirements.txt` e no workflow de CI (só
+  usados por `test_edge_mitigation.py` pra montar os mocks — nenhum teste
+  conecta de verdade via rede). `test_socket_server.py` é novo e, de
+  passagem, também cobriu `block_add/del/list`, que não tinham teste
+  automatizado antes.
 
 ### v1.11.0 — 2026-07-02 — Migra WhatsApp de CallMeBot pra Evolution API self-hosted
 - `notifier.py`: `send_whatsapp()` reescrito pra falar com a Evolution API

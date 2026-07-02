@@ -17,6 +17,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 import configio
+import edge_mitigation
 
 DEFAULT_CONFIG_PATH = "/root/clientguard/config.yaml"
 DEFAULT_SOCKET_PATH = "/var/run/clientguard.sock"
@@ -269,6 +270,58 @@ def cmd_block_list(args: argparse.Namespace, sock_path: str) -> None:
         console.print(table)
 
 
+def cmd_edge_apply(args: argparse.Namespace, sock_path: str) -> None:
+    resp = send_command(sock_path, {"cmd": "edge_apply", "ip": args.ip, "ttl_s": args.ttl_s})
+    if resp.get("ok") and resp.get("already_active"):
+        _print_simple(resp, ok_message=f"{args.ip} já tinha mitigação ativa (TTL renovado)")
+    else:
+        _print_simple(resp, ok_message=f"{args.ip} bloqueado direto na borda (mitigação id={resp.get('id')})")
+
+
+def cmd_edge_revert(args: argparse.Namespace, sock_path: str) -> None:
+    resp = send_command(sock_path, {"cmd": "edge_revert", "id": args.id})
+    _print_simple(resp, ok_message=f"mitigação {args.id} revertida")
+
+
+def cmd_edge_list(args: argparse.Namespace, sock_path: str) -> None:
+    resp = send_command(sock_path, {"cmd": "edge_list", "active_only": args.active_only})
+    die_on_error(resp)
+    table = Table(title="Mitigações Diretas na Borda (SSH/ACL)")
+    table.add_column("ID")
+    table.add_column("src_ip")
+    table.add_column("Status")
+    table.add_column("Gatilho")
+    table.add_column("Aplicada em")
+    table.add_column("Expira em")
+    now = time.time()
+    for row in resp["mitigations"]:
+        ttl = f"{max(0, int(row['ts_expires'] - now))}s" if row.get("ts_expires") else "sem TTL"
+        table.add_row(str(row["id"]), row["src_ip"], row["status"], row["trigger_type"],
+                      fmt_ts(row["ts_applied"]), ttl if row["status"] == "active" else "-")
+    if not resp["mitigations"]:
+        console.print("[green]Nenhuma mitigação de borda registrada.[/green]")
+    else:
+        console.print(table)
+
+
+def cmd_edge_auto_list(args: argparse.Namespace, sock_path: str) -> None:
+    resp = send_command(sock_path, {"cmd": "edge_config"})
+    die_on_error(resp)
+    cfg = resp["config"]
+    table = Table(title="Gatilho automático — mitigação direta na borda")
+    table.add_column("Detector")
+    table.add_column("Estado")
+    for key, value in cfg["auto_mitigate"].items():
+        table.add_row(key, "[green]habilitado[/green]" if value else "[red]desabilitado[/red]")
+    console.print(table)
+    console.print(f"TTL padrão: {cfg['default_ttl_s']}s  |  equipamento: {cfg['warmode_device'] or '(não configurado)'}")
+
+
+def cmd_edge_auto_set(args: argparse.Namespace, sock_path: str) -> None:
+    resp = send_command(sock_path, {"cmd": "edge_set_auto", "auto_mitigate": {args.detector: args.value == "on"}})
+    _print_simple(resp, ok_message=f"auto-mitigação de borda: {args.detector} = {args.value}")
+
+
 def cmd_reload(args: argparse.Namespace, sock_path: str) -> None:
     resp = send_command(sock_path, {"cmd": "reload"})
     _print_simple(resp, ok_message="config recarregado (clientes e whitelist)")
@@ -406,6 +459,27 @@ def main() -> None:
     p_block_del.add_argument("id", type=int)
     p_block_del.set_defaults(func=cmd_block_del)
     block_sub.add_parser("list").set_defaults(func=cmd_block_list)
+
+    p_edge = sub.add_parser("edge", help="mitigação direta na borda (SSH/ACL no roteador, sem depender do FlowGuard)")
+    edge_sub = p_edge.add_subparsers(dest="edge_action", required=True)
+    p_edge_apply = edge_sub.add_parser("apply")
+    p_edge_apply.add_argument("ip", help="IP a bloquear na borda")
+    p_edge_apply.add_argument("--ttl-s", type=int, default=None, dest="ttl_s",
+                               help="expira em N segundos (padrão: edge_mitigation.yaml default_ttl_s)")
+    p_edge_apply.set_defaults(func=cmd_edge_apply)
+    p_edge_revert = edge_sub.add_parser("revert")
+    p_edge_revert.add_argument("id", type=int)
+    p_edge_revert.set_defaults(func=cmd_edge_revert)
+    p_edge_list = edge_sub.add_parser("list")
+    p_edge_list.add_argument("--active-only", action="store_true", dest="active_only")
+    p_edge_list.set_defaults(func=cmd_edge_list)
+    p_edge_auto = edge_sub.add_parser("auto", help="gatilho automático por detector")
+    edge_auto_sub = p_edge_auto.add_subparsers(dest="edge_auto_action", required=True)
+    edge_auto_sub.add_parser("list").set_defaults(func=cmd_edge_auto_list)
+    p_edge_auto_set = edge_auto_sub.add_parser("set")
+    p_edge_auto_set.add_argument("detector", choices=sorted(edge_mitigation.DEFAULT_CONFIG["auto_mitigate"]))
+    p_edge_auto_set.add_argument("value", choices=["on", "off"])
+    p_edge_auto_set.set_defaults(func=cmd_edge_auto_set)
 
     sub.add_parser("reload").set_defaults(func=cmd_reload)
     sub.add_parser("stop").set_defaults(func=cmd_stop)

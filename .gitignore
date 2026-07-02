@@ -6,4 +6,5 @@ db/*.sqlite-shm
 db/*.sqlite-wal
 db/threat_ips.txt
 *.log
+logs/
 .pytest_cache/

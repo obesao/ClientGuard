@@ -1,0 +1,21 @@
+# edge_mitigation.yaml — mitigação direta na borda (SSH/ACL) por IP de
+# cliente abusivo. auto_mitigate/default_ttl_s são editáveis pelo portal ou
+# clientguard-cli edge auto set; acl_number/apply_commands/revert_commands só
+# à mão aqui (ajuste pro ACL/sintaxe reais já aplicados na borda).
+warmode_device: ''
+acl_number: 3999
+default_ttl_s: 21600
+apply_commands:
+- acl number {acl_number}
+- rule deny ip source {ip} 0
+revert_commands:
+- acl number {acl_number}
+- undo rule deny ip source {ip} 0
+auto_mitigate:
+  port_scan_horizontal: false
+  port_scan_vertical: false
+  amplifier_hosted: false
+  spam_bot: false
+  malicious_contact: false
+  coordinated_destination: false
+  dns_tunneling: false

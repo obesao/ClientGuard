@@ -16,6 +16,7 @@ from pathlib import Path
 
 import configio
 import control
+import edge_mitigation
 import storage
 
 LOG = logging.getLogger("clientguard.socket")
@@ -26,6 +27,9 @@ LOG = logging.getLogger("clientguard.socket")
 # vez, ou CLI + portal ao mesmo tempo) poderiam intercalar leitura/escrita e perder uma
 # mudança sem isso. Lock dedicado (não db_lock) porque não protege o SQLite, só este arquivo.
 _TOGGLES_LOCK = threading.Lock()
+
+# Mesmo motivo do _TOGGLES_LOCK, mas pro read-modify-write de edge_mitigation.yaml.
+_EDGE_CFG_LOCK = threading.Lock()
 
 WHITELIST_HEADER = (
     "# whitelist.yaml — src_ip/prefixos que NUNCA devem gerar alerta no ClientGuard\n"
@@ -298,6 +302,69 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         # mecanismo de proteção de vítima do FlowGuard, não bloqueio de cliente
         blocks = [r for r in resp.get("rules", []) if r.get("src_prefix") and r.get("action") != "rtbh"]
         return {"ok": True, "blocks": blocks}
+
+    # --- mitigação direta na borda (SSH/ACL), sem depender do FlowGuard ------
+    # Diferente de block_add/del/list (proxy pro FlowSpec via BGP do FlowGuard), isto
+    # conecta via SSH/Netmiko direto no equipamento (ver edge_mitigation.py) —
+    # reaproveita as credenciais já cadastradas no warmode.yaml do Modo Guerra do
+    # FlowGuard, mas a técnica (ACL) e o gatilho por sinal são exclusivos do ClientGuard.
+
+    def _flowguard_path(self) -> str:
+        return self.daemon_ref.config.get("flowguard_reuse", {}).get("path", "/root/flowguard")
+
+    def _cmd_edge_apply(self, request: dict) -> dict:
+        ip = request.get("ip")
+        if not ip:
+            return {"ok": False, "error": "ip obrigatório"}
+        d = self.daemon_ref
+        ttl_s = request.get("ttl_s")
+        ttl_s = int(ttl_s) if ttl_s else d.edge_cfg.get("default_ttl_s")
+        signal_id = request.get("signal_id")
+        return edge_mitigation.apply_and_record(
+            d.conn, d.db_lock, ip, int(signal_id) if signal_id else None, ttl_s, "manual",
+            d.edge_cfg, self._flowguard_path(),
+        )
+
+    def _cmd_edge_revert(self, request: dict) -> dict:
+        mitigation_id = request.get("id")
+        if not mitigation_id:
+            return {"ok": False, "error": "id obrigatório"}
+        d = self.daemon_ref
+        return edge_mitigation.revert_and_record(
+            d.conn, d.db_lock, int(mitigation_id), d.edge_cfg, self._flowguard_path(),
+        )
+
+    def _cmd_edge_list(self, request: dict) -> dict:
+        d = self.daemon_ref
+        with d.db_lock:
+            items = storage.list_edge_mitigations(d.conn, active_only=bool(request.get("active_only", False)))
+        return {"ok": True, "mitigations": items}
+
+    def _cmd_edge_config(self, request: dict) -> dict:
+        cfg = self.daemon_ref.edge_cfg
+        return {"ok": True, "config": {
+            "warmode_device": cfg.get("warmode_device", ""), "acl_number": cfg.get("acl_number"),
+            "default_ttl_s": cfg.get("default_ttl_s"), "auto_mitigate": cfg.get("auto_mitigate", {}),
+        }}
+
+    def _cmd_edge_set_auto(self, request: dict) -> dict:
+        changes = request.get("auto_mitigate")
+        if not isinstance(changes, dict) or not changes:
+            return {"ok": False, "error": "auto_mitigate (objeto não vazio) obrigatório"}
+        d = self.daemon_ref
+        path = d.config.get("edge_mitigation_file", edge_mitigation.DEFAULT_CONFIG_PATH)
+        default_ttl_s = request.get("default_ttl_s")
+        try:
+            with _EDGE_CFG_LOCK:
+                updated = edge_mitigation.save_auto_mitigate(
+                    changes, int(default_ttl_s) if default_ttl_s else None, path,
+                )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        d.reload_config()
+        return {"ok": True, "config": {
+            "auto_mitigate": updated.get("auto_mitigate", {}), "default_ttl_s": updated.get("default_ttl_s"),
+        }}
 
     def _cmd_reload(self, request: dict) -> dict:
         self.daemon_ref.reload_config()

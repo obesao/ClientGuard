@@ -39,6 +39,12 @@ whitelist_file: /root/clientguard/whitelist.yaml
 # ou arquivo inexistente = habilitado (não muda comportamento pra quem não usar isso)
 feature_toggles_file: /root/clientguard/toggles.yaml
 
+# mitigação direta na borda (SSH/ACL no roteador) por src_ip — ver
+# edge_mitigation.yaml (equipamento/ACL/gatilhos automáticos por detector). Reaproveita
+# as credenciais SSH já cadastradas no warmode.yaml do FlowGuard (flowguard_reuse.path
+# abaixo aponta pra onde procurar esse arquivo).
+edge_mitigation_file: /root/clientguard/edge_mitigation.yaml
+
 detection:
   scan_horizontal_hosts: 30      # N destinos distintos, mesma porta, pra contar como scan horizontal
   scan_vertical_ports: 30        # N portas distintas, mesmo destino, pra contar como scan vertical

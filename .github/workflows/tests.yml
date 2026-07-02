@@ -19,8 +19,10 @@ jobs:
       # Só o que a suíte de testes precisa de verdade — scapy/anthropic/rich são do
       # daemon/CLI em produção, não são importados por nenhum módulo exercitado
       # pelos testes (confirmado bloqueando scapy manualmente antes de criar isso).
+      # netmiko/paramiko entram aqui porque test_edge_mitigation.py importa netmiko.exceptions
+      # pra montar os mocks (nunca conecta de verdade via rede).
       - name: Instala dependências de teste
-        run: pip install pytest pyyaml
+        run: pip install pytest pyyaml netmiko paramiko
 
       - name: Roda a suíte
         run: pytest -v

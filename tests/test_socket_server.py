@@ -1,0 +1,199 @@
+"""Testa os comandos do socket (_cmd_*) chamando SocketServer.dispatch diretamente,
+sem abrir um socket Unix de verdade — SocketServer.__init__ faria bind/chmod num
+arquivo real, desnecessário pra testar só a lógica de despacho dos comandos.
+
+Cobre tanto os comandos novos de mitigação de borda (edge_*) quanto block_*/toggles,
+que não tinham nenhum teste automatizado antes desta suíte existir."""
+
+from __future__ import annotations
+
+import threading
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+import edge_mitigation
+import socket_server
+import storage
+
+
+class FakeDaemon:
+    def __init__(self, conn, tmp_path):
+        self.conn = conn
+        self.db_lock = threading.Lock()
+        self.config = {
+            "daemon": {"socket": "/tmp/nao-usado.sock"},
+            "flowguard_socket": "/var/run/flowguard.sock",
+            "flowguard_reuse": {"path": str(tmp_path / "flowguard")},
+            "edge_mitigation_file": str(tmp_path / "edge_mitigation.yaml"),
+            "database": {"aggregate_interval_s": 30},
+        }
+        self.edge_cfg = edge_mitigation.load_config(self.config["edge_mitigation_file"])
+        self.edge_cfg["warmode_device"] = "NE8000 borda"
+        self.toggles = {}
+        self.reload_calls = 0
+
+    def reload_config(self):
+        self.reload_calls += 1
+        self.edge_cfg = edge_mitigation.load_config(self.config["edge_mitigation_file"])
+
+
+def _write_warmode_yaml(tmp_path):
+    flowguard_dir = tmp_path / "flowguard"
+    flowguard_dir.mkdir()
+    (flowguard_dir / "warmode.yaml").write_text(
+        "devices:\n  - name: \"NE8000 borda\"\n    host: 10.0.0.1\n    port: 22\n"
+        "    device_type: huawei_vrp\n    username: admin\n    password: secret\n"
+        "    enable_mode: false\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def conn():
+    c = storage.connect(":memory:", check_same_thread=False)
+    yield c
+    c.close()
+
+
+@pytest.fixture
+def server(conn, tmp_path):
+    _write_warmode_yaml(tmp_path)
+    srv = socket_server.SocketServer.__new__(socket_server.SocketServer)
+    srv.daemon_ref = FakeDaemon(conn, tmp_path)
+    return srv
+
+
+# --- block_* (proxy pro FlowGuard) ----------------------------------------
+
+def test_block_add_sends_flowspec_discard_rule(server):
+    with patch("control.send_command", return_value={"ok": True, "rule_id": 1}) as mock_send:
+        resp = server.dispatch({"cmd": "block_add", "ip": "1.2.3.4"})
+    assert resp == {"ok": True, "rule_id": 1}
+    sock_path, payload = mock_send.call_args[0]
+    assert sock_path == "/var/run/flowguard.sock"
+    assert payload["cmd"] == "flowspec_add"
+    assert payload["rule"]["src_prefix"] == "1.2.3.4/32"
+    assert payload["rule"]["action"] == "discard"
+
+
+def test_block_add_missing_ip(server):
+    resp = server.dispatch({"cmd": "block_add"})
+    assert resp["ok"] is False
+
+
+def test_block_add_invalid_ip(server):
+    resp = server.dispatch({"cmd": "block_add", "ip": "não-é-um-ip"})
+    assert resp["ok"] is False
+
+
+def test_block_del_sends_flowspec_del(server):
+    with patch("control.send_command", return_value={"ok": True}) as mock_send:
+        resp = server.dispatch({"cmd": "block_del", "id": 7})
+    assert resp["ok"] is True
+    _, payload = mock_send.call_args[0]
+    assert payload == {"cmd": "flowspec_del", "rule_id": 7}
+
+
+def test_block_list_filters_out_rtbh(server):
+    rules = [
+        {"id": 1, "src_prefix": "1.2.3.4/32", "action": "discard"},
+        {"id": 2, "src_prefix": None, "action": "rtbh"},
+        {"id": 3, "src_prefix": "5.6.7.8/32", "action": "rtbh"},
+    ]
+    with patch("control.send_command", return_value={"ok": True, "rules": rules}):
+        resp = server.dispatch({"cmd": "block_list"})
+    assert resp["ok"] is True
+    assert [b["id"] for b in resp["blocks"]] == [1]
+
+
+# --- edge_* (SSH/ACL direto na borda) --------------------------------------
+
+def test_edge_apply_creates_active_mitigation(server, conn):
+    fake_conn = MagicMock()
+    fake_conn.send_config_set.return_value = "ok"
+    with patch("netmiko.ConnectHandler", return_value=fake_conn):
+        resp = server.dispatch({"cmd": "edge_apply", "ip": "1.2.3.4"})
+    assert resp["ok"] is True
+    row = storage.get_active_edge_mitigation(conn, "1.2.3.4")
+    assert row is not None
+    assert row["trigger_type"] == "manual"
+
+
+def test_edge_apply_missing_ip(server):
+    resp = server.dispatch({"cmd": "edge_apply"})
+    assert resp["ok"] is False
+
+
+def test_edge_apply_uses_default_ttl_when_not_given(server, conn):
+    fake_conn = MagicMock()
+    fake_conn.send_config_set.return_value = "ok"
+    with patch("netmiko.ConnectHandler", return_value=fake_conn):
+        server.dispatch({"cmd": "edge_apply", "ip": "1.2.3.4"})
+    row = storage.get_active_edge_mitigation(conn, "1.2.3.4")
+    assert row["ts_expires"] is not None
+
+
+def test_edge_revert_marks_reverted(server, conn):
+    mitigation_id = storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "manual")
+    fake_conn = MagicMock()
+    fake_conn.send_config_set.return_value = "ok"
+    with patch("netmiko.ConnectHandler", return_value=fake_conn):
+        resp = server.dispatch({"cmd": "edge_revert", "id": mitigation_id})
+    assert resp["ok"] is True
+    assert storage.get_edge_mitigation(conn, mitigation_id)["status"] == "reverted"
+
+
+def test_edge_revert_missing_id(server):
+    resp = server.dispatch({"cmd": "edge_revert"})
+    assert resp["ok"] is False
+
+
+def test_edge_list_returns_all_by_default(server, conn):
+    storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "manual")
+    storage.mark_edge_reverted(conn, storage.insert_edge_mitigation(conn, "5.6.7.8", None, 3600, "manual"))
+    resp = server.dispatch({"cmd": "edge_list"})
+    assert resp["ok"] is True
+    assert len(resp["mitigations"]) == 2
+
+
+def test_edge_list_active_only(server, conn):
+    storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "manual")
+    storage.mark_edge_reverted(conn, storage.insert_edge_mitigation(conn, "5.6.7.8", None, 3600, "manual"))
+    resp = server.dispatch({"cmd": "edge_list", "active_only": True})
+    assert resp["ok"] is True
+    assert len(resp["mitigations"]) == 1
+    assert resp["mitigations"][0]["src_ip"] == "1.2.3.4"
+
+
+def test_edge_config_never_exposes_credentials(server):
+    resp = server.dispatch({"cmd": "edge_config"})
+    assert resp["ok"] is True
+    assert "password" not in resp["config"]
+    assert resp["config"]["warmode_device"] == "NE8000 borda"
+    assert resp["config"]["auto_mitigate"]["spam_bot"] is False
+
+
+def test_edge_set_auto_updates_config_and_reloads(server, tmp_path):
+    resp = server.dispatch({"cmd": "edge_set_auto", "auto_mitigate": {"spam_bot": True}})
+    assert resp["ok"] is True
+    assert resp["config"]["auto_mitigate"]["spam_bot"] is True
+    assert server.daemon_ref.reload_calls == 1
+    reloaded = edge_mitigation.load_config(server.daemon_ref.config["edge_mitigation_file"])
+    assert reloaded["auto_mitigate"]["spam_bot"] is True
+
+
+def test_edge_set_auto_unknown_detector_rejected(server):
+    resp = server.dispatch({"cmd": "edge_set_auto", "auto_mitigate": {"nao_existe": True}})
+    assert resp["ok"] is False
+    assert server.daemon_ref.reload_calls == 0
+
+
+def test_edge_set_auto_requires_nonempty_dict(server):
+    resp = server.dispatch({"cmd": "edge_set_auto", "auto_mitigate": {}})
+    assert resp["ok"] is False
+
+
+def test_dispatch_unknown_command(server):
+    resp = server.dispatch({"cmd": "isso_nao_existe"})
+    assert resp["ok"] is False
