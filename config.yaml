@@ -75,8 +75,6 @@ detection:
 alerts:
   webhook_url: ""
   whatsapp: true
-  wa_dest: 5599XXXXXXXXX
-  wa_apikey: ""
   min_confidence_wa: 0.8   # só avisa sinais com confiança alta o suficiente pra não virar spam
 
 ai:

@@ -6,13 +6,14 @@ from __future__ import annotations
 
 import json
 import logging
-import urllib.parse
+import sys
 import urllib.request
 from urllib.error import URLError
 
 LOG = logging.getLogger("clientguard.notifier")
 
-CALLMEBOT_URL = "https://api.callmebot.com/whatsapp.php"
+if "/root/evolution-api" not in sys.path:
+    sys.path.insert(0, "/root/evolution-api")
 
 
 def send_webhook(webhook_url: str, payload: dict, timeout: float = 5.0) -> bool:
@@ -29,17 +30,17 @@ def send_webhook(webhook_url: str, payload: dict, timeout: float = 5.0) -> bool:
         return False
 
 
-def send_whatsapp(phone: str, apikey: str, message: str, timeout: float = 10.0) -> bool:
-    """Mesmo provedor (CallMeBot) e mesma lógica do FlowGuard (flowguard/notifier.py) —
-    duplicado aqui de propósito, os dois projetos são deliberadamente independentes."""
-    if not phone or not apikey or not message:
-        return False
-    params = urllib.parse.urlencode({"phone": phone, "text": message, "apikey": apikey})
-    url = f"{CALLMEBOT_URL}?{params}"
+def send_whatsapp(message: str) -> bool:
+    """Mesma Evolution API self-hosted do FlowGuard (flowguard/notifier.py) —
+    duplicado aqui de propósito, os dois projetos são deliberadamente
+    independentes, mas só existe UMA sessão/destino WhatsApp real (compartilhado
+    via /root/evolution-api/notify.yaml, configurável pelo portal)."""
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            resp.read()
-        return True
-    except (URLError, OSError, ValueError):
-        LOG.exception("falha ao enviar alerta WhatsApp via CallMeBot")
+        import client as evo
+    except ImportError:
+        LOG.error("client.py da Evolution API não encontrado em /root/evolution-api")
         return False
+    dest = evo.load_dest().get("dest")
+    if not dest:
+        return False
+    return evo.send_text(dest, message)

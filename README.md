@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.10.0**
+**Versão atual: v1.11.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -95,6 +95,18 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.11.0 — 2026-07-02 — Migra WhatsApp de CallMeBot pra Evolution API self-hosted
+- `notifier.py`: `send_whatsapp()` reescrito pra falar com a Evolution API
+  self-hosted (`/root/evolution-api/`) em vez da CallMeBot — mesma migração do
+  FlowGuard, ver CHANGELOG de lá pro detalhe da conexão. Assinatura simplificou
+  pra `send_whatsapp(message)`: destino (grupo/número) e apikey agora vêm de
+  `/root/evolution-api/notify.yaml`/`.env`, compartilhados com o FlowGuard — só
+  existe UMA sessão WhatsApp real, configurável pelo portal.
+- `detector.py`: `_record_signal` chama `notifier.send_whatsapp(message)` sem
+  mais passar `wa_dest`/`wa_apikey` (removidos de `config.yaml`) — `wa_cfg`
+  continua roteado por todos os detectores só pra decidir *se* alerta
+  (`alerts.whatsapp`/`min_confidence_wa`), não mais o destino.
 
 ### v1.10.0 — 2026-07-02 — Aplicar várias funções de uma vez, de forma atômica
 - `save_feature_toggles`/socket `set_toggles` (novo) aplicam N mudanças numa

@@ -65,7 +65,7 @@ def _record_signal(conn: sqlite3.Connection, src_ip: str, customer_prefix: str |
             + f" — confiança {confidence:.2f}"
             + (f"\n{explanation}" if explanation else "")
         )
-        notifier.send_whatsapp(wa_cfg.get("wa_dest"), wa_cfg.get("wa_apikey"), message)
+        notifier.send_whatsapp(message)
 
 
 def _scaled_threshold(base: float, customer_prefix: str | None, multipliers: dict) -> float:
