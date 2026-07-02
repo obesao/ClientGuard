@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.8.0**
+**Versão atual: v1.10.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -69,12 +69,12 @@ comprometidos (scan, spam, amplificação, C2, exfiltração).
 | `threat_feed.py` | Feed de reputação de IPs maliciosos |
 | `geoip.py` | Enriquecimento ASN/país via Team Cymru |
 | `tools/synth_client_flows.py` | Gerador de NetFlow sintético para testar os detectores |
-| `tests/` | Suíte pytest (89 testes) — detectores, storage, configio, threat feed, geoip |
+| `tests/` | Suíte pytest (92 testes) — detectores, storage, configio, threat feed, geoip |
 
 ## Testes
 
 ```
-./venv/bin/pytest        # 89 testes, ~1s, sem rede/captura real
+./venv/bin/pytest        # 92 testes, ~1s, sem rede/captura real
 ```
 
 ## Uso
@@ -95,6 +95,23 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.10.0 — 2026-07-02 — Aplicar várias funções de uma vez, de forma atômica
+- `save_feature_toggles`/socket `set_toggles` (novo) aplicam N mudanças numa
+  única leitura+escrita, com lock dedicado (`_TOGGLES_LOCK`) no socket.
+  Achado real ao revisar o botão "Aplicar novas configurações" recém-criado
+  no portal: ele mandava 1 requisição por checkbox marcado, em paralelo — como
+  o socket do ClientGuard atende conexões em threads de verdade
+  (`ThreadingUnixStreamServer`, não asyncio), duas dessas requisições
+  concorrentes podiam intercalar leitura/escrita de `toggles.yaml` e perder
+  uma mudança silenciosamente (thread A lê, thread B lê o mesmo estado antigo,
+  A grava, B grava por cima sem ver a mudança de A). `set_toggle` (1 chave) e
+  `clientguard-cli toggles set` continuam funcionando — passaram a delegar
+  pra `set_toggles` internamente.
+- Testes novos em `test_configio.py` cobrindo aplicação em lote, validação de
+  chave desconhecida (não escreve nada se alguma chave for inválida) e o
+  cenário de regressão específico (várias chaves de uma vez não pode perder
+  nenhuma).
 
 ### v1.9.0 — 2026-07-02 — Alertas via WhatsApp (CallMeBot)
 - `notifier.py` ganhou `send_whatsapp()` (CallMeBot, mesmo provedor/lógica do
