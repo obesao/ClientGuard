@@ -34,6 +34,10 @@ flowguard_reuse:
 
 customer_registry: /root/clientguard/customers.yaml
 whitelist_file: /root/clientguard/whitelist.yaml
+# liga/desliga cada detector e a explicação por IA, editável via portal (aba
+# ClientGuard > Configurações) ou `clientguard-cli toggles set` — chave ausente
+# ou arquivo inexistente = habilitado (não muda comportamento pra quem não usar isso)
+feature_toggles_file: /root/clientguard/toggles.yaml
 
 detection:
   scan_horizontal_hosts: 30      # N destinos distintos, mesma porta, pra contar como scan horizontal
@@ -82,7 +86,7 @@ threat_feed:
   # Implementação própria do ClientGuard (o FlowGuard só tem essa seção no config.yaml
   # dele, nunca implementou o download). Mescla feeds públicos de reputação num cache
   # local, refeito a cada update_interval_h; detect_malicious_contact usa esse cache.
-  enabled: true
+  enabled: false
   cache_file: /root/clientguard/db/threat_ips.txt
   update_interval_h: 6
   sources:

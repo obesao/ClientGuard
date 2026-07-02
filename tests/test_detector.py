@@ -4,12 +4,32 @@ determinísticos e sem precisar de tráfego de rede real."""
 
 from __future__ import annotations
 
+import configio
 import detector
 import storage
 import threat_feed
 from conftest import insert_flow
 
 WINDOW_S = 30
+
+
+def _base_config():
+    return {
+        "detection": {
+            "window_s": WINDOW_S,
+            "scan_horizontal_hosts": 5,
+            "scan_vertical_ports": 5,
+            "scan_max_avg_bytes": None,
+            "amplifier_ports": [53],
+            "amplifier_min_bps": 1,
+            "spam_ports": [25],
+            "spam_min_distinct_dest": 5,
+            "coordinated_min_clients": 5,
+            "dns_tunneling_min_queries": 5,
+            "common_service_ports": [],
+        },
+        "alerts": {"webhook_url": ""},
+    }
 
 
 def open_signals(conn):
@@ -359,3 +379,38 @@ def test_resolve_then_new_occurrence_reopens_signal(conn):
     reopened = open_signals(conn)
     assert len(reopened) == 1
     assert reopened[0]["id"] != signal_id
+
+
+# --- toggles (habilita/desabilita via portal) ------------------------------------
+
+def test_run_all_skips_detector_disabled_by_toggle(conn):
+    for i in range(10):
+        insert_flow(conn, "177.86.19.90", f"45.10.{i}.1", 22, protocol=6)
+    toggles = dict(configio.DEFAULT_FEATURE_TOGGLES)
+    toggles["scan_horizontal"] = False
+    detector.run_all(conn, _base_config(), whitelist=set(), toggles=toggles)
+    assert "port_scan_horizontal" not in signal_types(conn)
+
+
+def test_run_all_runs_detector_when_toggle_missing_defaults_enabled(conn):
+    for i in range(10):
+        insert_flow(conn, "177.86.19.91", f"45.10.{i}.1", 22, protocol=6)
+    detector.run_all(conn, _base_config(), whitelist=set(), toggles={})
+    assert "port_scan_horizontal" in signal_types(conn)
+
+
+def test_run_all_disabling_ai_explanations_passes_none_as_ai_client(conn):
+    calls = []
+
+    class FakeAI:
+        def explain_signal(self, *args, **kwargs):
+            calls.append(True)
+            return "explicação"
+
+    for i in range(10):
+        insert_flow(conn, "177.86.19.92", f"45.10.{i}.1", 22, protocol=6)
+    toggles = dict(configio.DEFAULT_FEATURE_TOGGLES)
+    toggles["ai_explanations"] = False
+    detector.run_all(conn, _base_config(), whitelist=set(), ai_client=FakeAI(), toggles=toggles)
+    assert "port_scan_horizontal" in signal_types(conn)
+    assert not calls  # sinal disparou normalmente, mas sem chamar a IA

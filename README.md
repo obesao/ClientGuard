@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.7.0**
+**Versão atual: v1.8.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -46,6 +46,9 @@ comprometidos (scan, spam, amplificação, C2, exfiltração).
 13. **Aba no portal web** (repositório do portal) — status, top clientes, sinais
     suspeitos com painel de detalhe/IA, e CRUD de redes/whitelist, reaproveitando
     login/sessão do portal do FlowGuard.
+14. **Configurações via portal** (`toggles.yaml`) — liga/desliga cada um dos 7
+    detectores e a explicação por IA individualmente por checkbox, e um botão
+    que marca todos os sinais suspeitos abertos como resolvidos de uma vez.
 
 **Pendente:** `alerts.webhook_url` ainda não configurado (aguardando destino).
 
@@ -66,12 +69,12 @@ comprometidos (scan, spam, amplificação, C2, exfiltração).
 | `threat_feed.py` | Feed de reputação de IPs maliciosos |
 | `geoip.py` | Enriquecimento ASN/país via Team Cymru |
 | `tools/synth_client_flows.py` | Gerador de NetFlow sintético para testar os detectores |
-| `tests/` | Suíte pytest (57 testes) — detectores, storage, configio, threat feed, geoip |
+| `tests/` | Suíte pytest (89 testes) — detectores, storage, configio, threat feed, geoip |
 
 ## Testes
 
 ```
-./venv/bin/pytest        # 57 testes, ~2s, sem rede/captura real
+./venv/bin/pytest        # 89 testes, ~1s, sem rede/captura real
 ```
 
 ## Uso
@@ -80,15 +83,43 @@ comprometidos (scan, spam, amplificação, C2, exfiltração).
 systemctl status clientguard
 clientguard-cli status
 clientguard-cli suspicious
+clientguard-cli clear-suspicious
 clientguard-cli top
 clientguard-cli whitelist add|del <ip>
 clientguard-cli customers add|del <network> <prefix>
+clientguard-cli toggles list
+clientguard-cli toggles set <funcao> on|off
 ```
 
 ## Changelog
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.8.0 — 2026-07-02 — Configurações via portal: liga/desliga detectores + limpar suspeitos
+- `toggles.yaml` (novo, separado do `config.yaml` — mesmo motivo de
+  whitelist/customers: editar via portal não pode reescrever/perder os
+  comentários do config principal) guarda o estado de cada um dos 7
+  detectores e da explicação por IA. Chave ausente ou arquivo inexistente =
+  habilitado, então quem nunca mexe nisso não tem mudança de comportamento.
+- `detector.run_all` passou a aceitar `toggles` e pula qualquer detector
+  desabilitado; `ai_explanations=false` passa `ai_client=None` pros
+  detectores nesse ciclo, sem tocar em `ai_client.py`.
+- Novos comandos no socket do daemon: `toggles` (lista o estado atual),
+  `set_toggle` (liga/desliga um, recarrega o daemon) e `clear_suspicious`
+  (marca TODOS os sinais abertos como resolvidos de uma vez — usa
+  `resolved=1`, igual `resolve_signal`, então o histórico/evidência/
+  explicação de IA continuam consultáveis na aba "Resolvidos").
+- `clientguard-cli toggles list|set` e `clientguard-cli clear-suspicious`.
+- Portal: nova seção "Configurações — Funções do ClientGuard" na aba
+  ClientGuard, com um checkbox por função (`clientguard-toggles.sh`, novo) e
+  um botão "Limpar hosts suspeitos" (com confirmação, reaproveita
+  `clientguard-suspicious.sh` com `clear_all: true`).
+- Achado ao testar em produção: `malicious_contact` continuava disparando
+  mesmo com `threat_feed.enabled: false` no `config.yaml` — esse flag só
+  controla o loop de atualização do feed em segundo plano, nunca gateou o
+  detector em si. O toggle novo é o primeiro jeito de desligar esse detector
+  de fato sem editar `detector.py`/reiniciar o daemon.
 
 ### v1.7.0 — 2026-07-02 — Bloqueio manual de IP via portal/CLI
 - Novo comando `block_add`/`block_del`/`block_list` no socket do daemon

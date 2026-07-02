@@ -1,0 +1,11 @@
+# toggles.yaml — habilita/desabilita cada detector e a explicação por IA, editável
+# via portal (aba ClientGuard > Configurações) ou clientguard-cli toggles set.
+# Chave ausente = habilitado (mesmo padrão de antes desta feature existir).
+scan_horizontal: true
+scan_vertical: true
+amplifier: true
+spam: true
+malicious_contact: true
+coordinated_destination: true
+dns_tunneling: true
+ai_explanations: true

@@ -42,6 +42,7 @@ class ClientGuardDaemon:
         self.db_lock = threading.Lock()
         self.customers = configio.load_yaml_list(self.config["customer_registry"])
         self.whitelist = WhitelistMatcher(configio.load_yaml_list(self.config["whitelist_file"]))
+        self.toggles = configio.load_feature_toggles(self.config.get("feature_toggles_file", ""))
         self.ai_client = ai_client.AIClient(self.config.get("ai", {}))
         self.threat_feed = threat_feed.ThreatFeed(self.config.get("threat_feed", {}).get("cache_file", ""))
         self.geoip = geoip.GeoIPCache(self.conn, self.db_lock)
@@ -53,8 +54,9 @@ class ClientGuardDaemon:
     def reload_config(self) -> None:
         self.customers = configio.load_yaml_list(self.config["customer_registry"])
         self.whitelist = WhitelistMatcher(configio.load_yaml_list(self.config["whitelist_file"]))
-        LOG.info("config recarregado: %d clientes cadastrados, %d na whitelist",
-                 len(self.customers), len(self.whitelist))
+        self.toggles = configio.load_feature_toggles(self.config.get("feature_toggles_file", ""))
+        LOG.info("config recarregado: %d clientes cadastrados, %d na whitelist, toggles=%s",
+                 len(self.customers), len(self.whitelist), self.toggles)
 
     def threat_feed_loop(self) -> None:
         cfg = self.config.get("threat_feed", {})
@@ -149,7 +151,8 @@ class ClientGuardDaemon:
                     f", {skipped} sem cliente identificado" if skipped else "",
                 )
             detector.run_all(self.conn, self.config, self.whitelist, customers=self.customers,
-                              ai_client=self.ai_client, threat_feed=self.threat_feed, db_lock=self.db_lock)
+                              ai_client=self.ai_client, threat_feed=self.threat_feed, db_lock=self.db_lock,
+                              toggles=self.toggles)
 
         self._cycle_count += 1
         interval = self.config["database"]["aggregate_interval_s"]

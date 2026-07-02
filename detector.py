@@ -335,7 +335,16 @@ def detect_dns_tunneling(conn: sqlite3.Connection, window_s: int, min_queries: i
 
 
 def run_all(conn: sqlite3.Connection, config: dict, whitelist: set, customers: list[dict] = (),
-            ai_client=None, threat_feed=None, db_lock=None) -> None:
+            ai_client=None, threat_feed=None, db_lock=None, toggles: dict = None) -> None:
+    """toggles (ver configio.DEFAULT_FEATURE_TOGGLES) liga/desliga cada detector
+    individualmente, e ai_explanations liga/desliga a explicação de IA pra qualquer
+    sinal que dispare nesse ciclo — chave ausente = habilitado, pra não mudar
+    comportamento de quem nunca configurou toggles.yaml."""
+    toggles = toggles or {}
+
+    def on(key: str) -> bool:
+        return toggles.get(key, True)
+
     det = config["detection"]
     webhook_url = config.get("alerts", {}).get("webhook_url", "")
     # customer_prefix -> fator: quantas identidades reais um único src_ip visível daquele
@@ -343,18 +352,26 @@ def run_all(conn: sqlite3.Connection, config: dict, whitelist: set, customers: l
     multipliers = {c["prefix"]: c["client_multiplier"] for c in customers
                    if c.get("prefix") and c.get("client_multiplier")}
     max_avg_bytes = det.get("scan_max_avg_bytes")
-    detect_scan_horizontal(conn, det["window_s"], det["scan_horizontal_hosts"], whitelist,
-                            det["common_service_ports"], multipliers, max_avg_bytes,
-                            webhook_url, ai_client, db_lock)
-    detect_scan_vertical(conn, det["window_s"], det["scan_vertical_ports"], whitelist,
-                          multipliers, max_avg_bytes, webhook_url, ai_client, db_lock)
-    detect_amplifier(conn, det["window_s"], det["amplifier_ports"], det["amplifier_min_bps"], whitelist,
-                      multipliers, webhook_url, ai_client, db_lock)
-    detect_spam(conn, det["window_s"], det["spam_ports"], det["spam_min_distinct_dest"], whitelist,
-                multipliers, webhook_url, ai_client, db_lock)
-    detect_malicious_contact(conn, det["window_s"], threat_feed, whitelist, webhook_url, ai_client, db_lock)
-    detect_shared_destination(conn, det["window_s"], det["coordinated_min_clients"],
-                               det["common_service_ports"], whitelist, multipliers,
-                               webhook_url, ai_client, db_lock)
-    detect_dns_tunneling(conn, det["window_s"], det["dns_tunneling_min_queries"], whitelist,
-                          multipliers, webhook_url, ai_client, db_lock)
+    ai = ai_client if on("ai_explanations") else None
+    if on("scan_horizontal"):
+        detect_scan_horizontal(conn, det["window_s"], det["scan_horizontal_hosts"], whitelist,
+                                det["common_service_ports"], multipliers, max_avg_bytes,
+                                webhook_url, ai, db_lock)
+    if on("scan_vertical"):
+        detect_scan_vertical(conn, det["window_s"], det["scan_vertical_ports"], whitelist,
+                              multipliers, max_avg_bytes, webhook_url, ai, db_lock)
+    if on("amplifier"):
+        detect_amplifier(conn, det["window_s"], det["amplifier_ports"], det["amplifier_min_bps"], whitelist,
+                          multipliers, webhook_url, ai, db_lock)
+    if on("spam"):
+        detect_spam(conn, det["window_s"], det["spam_ports"], det["spam_min_distinct_dest"], whitelist,
+                    multipliers, webhook_url, ai, db_lock)
+    if on("malicious_contact"):
+        detect_malicious_contact(conn, det["window_s"], threat_feed, whitelist, webhook_url, ai, db_lock)
+    if on("coordinated_destination"):
+        detect_shared_destination(conn, det["window_s"], det["coordinated_min_clients"],
+                                   det["common_service_ports"], whitelist, multipliers,
+                                   webhook_url, ai, db_lock)
+    if on("dns_tunneling"):
+        detect_dns_tunneling(conn, det["window_s"], det["dns_tunneling_min_queries"], whitelist,
+                              multipliers, webhook_url, ai, db_lock)

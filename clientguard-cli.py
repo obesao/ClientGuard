@@ -16,6 +16,8 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
+import configio
+
 DEFAULT_CONFIG_PATH = "/root/clientguard/config.yaml"
 DEFAULT_SOCKET_PATH = "/var/run/clientguard.sock"
 
@@ -195,6 +197,28 @@ def cmd_resolve(args: argparse.Namespace, sock_path: str) -> None:
     _print_simple(resp, ok_message=f"sinal {args.id} marcado como resolvido")
 
 
+def cmd_clear_suspicious(args: argparse.Namespace, sock_path: str) -> None:
+    resp = send_command(sock_path, {"cmd": "clear_suspicious"})
+    die_on_error(resp)
+    console.print(f"[green]{resp['cleared']} sinal(is) suspeito(s) marcado(s) como resolvido.[/green]")
+
+
+def cmd_toggles_list(args: argparse.Namespace, sock_path: str) -> None:
+    resp = send_command(sock_path, {"cmd": "toggles"})
+    die_on_error(resp)
+    table = Table(title="Funções do ClientGuard")
+    table.add_column("Função")
+    table.add_column("Estado")
+    for key, value in resp["toggles"].items():
+        table.add_row(key, "[green]habilitado[/green]" if value else "[red]desabilitado[/red]")
+    console.print(table)
+
+
+def cmd_toggles_set(args: argparse.Namespace, sock_path: str) -> None:
+    resp = send_command(sock_path, {"cmd": "set_toggle", "key": args.key, "value": args.value == "on"})
+    _print_simple(resp, ok_message=f"{args.key} = {args.value}")
+
+
 def cmd_whitelist_add(args: argparse.Namespace, sock_path: str) -> None:
     resp = send_command(sock_path, {"cmd": "whitelist_add", "ip": args.ip})
     _print_simple(resp)
@@ -339,6 +363,17 @@ def main() -> None:
     p_resolve = sub.add_parser("resolve")
     p_resolve.add_argument("id", type=int)
     p_resolve.set_defaults(func=cmd_resolve)
+
+    sub.add_parser("clear-suspicious", help="marca TODOS os sinais abertos como resolvidos de uma vez"
+                    ).set_defaults(func=cmd_clear_suspicious)
+
+    p_toggles = sub.add_parser("toggles", help="liga/desliga detectores e a explicação por IA")
+    toggles_sub = p_toggles.add_subparsers(dest="toggles_action", required=True)
+    toggles_sub.add_parser("list").set_defaults(func=cmd_toggles_list)
+    p_toggles_set = toggles_sub.add_parser("set")
+    p_toggles_set.add_argument("key", choices=sorted(configio.DEFAULT_FEATURE_TOGGLES))
+    p_toggles_set.add_argument("value", choices=["on", "off"])
+    p_toggles_set.set_defaults(func=cmd_toggles_set)
 
     p_whitelist = sub.add_parser("whitelist")
     whitelist_sub = p_whitelist.add_subparsers(dest="whitelist_action", required=True)

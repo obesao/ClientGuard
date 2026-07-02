@@ -41,6 +41,28 @@ def test_resolve_signal_returns_false_for_unknown_id(conn):
     assert storage.resolve_signal(conn, 999999) is False
 
 
+def test_clear_open_signals_resolves_only_open_ones(conn):
+    already_resolved = storage.insert_suspicious_client(conn, {
+        "src_ip": "177.86.19.10", "customer_prefix": None,
+        "signal_type": "spam_bot", "confidence": 0.8, "evidence": "{}",
+    })
+    storage.resolve_signal(conn, already_resolved)
+    open_a = storage.insert_suspicious_client(conn, {
+        "src_ip": "177.86.19.11", "customer_prefix": None,
+        "signal_type": "spam_bot", "confidence": 0.8, "evidence": "{}",
+    })
+    open_b = storage.insert_suspicious_client(conn, {
+        "src_ip": "177.86.19.12", "customer_prefix": None,
+        "signal_type": "port_scan_horizontal", "confidence": 0.5, "evidence": "{}",
+    })
+    cleared = storage.clear_open_signals(conn)
+    assert cleared == 2
+    assert storage.get_open_signal(conn, "177.86.19.11", "spam_bot") is None
+    assert storage.get_open_signal(conn, "177.86.19.12", "port_scan_horizontal") is None
+    # já resolvido antes não deve ser contado de novo
+    assert storage.clear_open_signals(conn) == 0
+
+
 def test_touch_signal_updates_evidence_and_last_seen(conn):
     signal_id = storage.insert_suspicious_client(conn, {
         "src_ip": "177.86.19.4", "customer_prefix": None,

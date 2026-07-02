@@ -159,6 +159,15 @@ def resolve_signal(conn: sqlite3.Connection, signal_id: int) -> bool:
     return cur.rowcount > 0
 
 
+def clear_open_signals(conn: sqlite3.Connection) -> int:
+    """Resolve TODOS os sinais abertos de uma vez (botão "Limpar hosts suspeitos" do
+    portal) — marca resolved=1 em vez de apagar a linha, igual resolve_signal, pra manter
+    o histórico/evidência/explicação de IA consultável na aba "Resolvidos"."""
+    cur = conn.execute("UPDATE suspicious_clients SET resolved = 1 WHERE resolved = 0")
+    conn.commit()
+    return cur.rowcount
+
+
 def top_src_ips(conn: sqlite3.Connection, window_s: int, limit: int) -> list[dict]:
     since = int(time.time()) - window_s
     rows = conn.execute(

@@ -152,6 +152,29 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
             return {"ok": False, "error": "sinal não encontrado ou já resolvido"}
         return {"ok": True}
 
+    def _cmd_clear_suspicious(self, request: dict) -> dict:
+        d = self.daemon_ref
+        with d.db_lock:
+            cleared = storage.clear_open_signals(d.conn)
+        return {"ok": True, "cleared": cleared}
+
+    # --- toggles: habilita/desabilita cada detector e a IA via portal/CLI ---
+
+    def _cmd_toggles(self, request: dict) -> dict:
+        return {"ok": True, "toggles": self.daemon_ref.toggles}
+
+    def _cmd_set_toggle(self, request: dict) -> dict:
+        key = request.get("key")
+        if key not in configio.DEFAULT_FEATURE_TOGGLES:
+            return {"ok": False, "error": f"toggle desconhecido: {key}"}
+        d = self.daemon_ref
+        path = d.config.get("feature_toggles_file", "")
+        if not path:
+            return {"ok": False, "error": "feature_toggles_file não configurado"}
+        updated = configio.save_feature_toggle(path, key, bool(request.get("value")))
+        d.reload_config()
+        return {"ok": True, "toggles": updated}
+
     def _cmd_whitelist_add(self, request: dict) -> dict:
         ip = request.get("ip")
         if not ip:
