@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.1.0**
+**Versão atual: v1.1.1**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor POX Network.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -80,6 +80,14 @@ clientguard-cli customers add|del <network> <prefix>
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.1.1 — 2026-07-01 — Índice de performance pra queries por dst_ip
+- `idx_client_flow_dst (dst_ip, dst_port, ts)` — `detect_malicious_contact`
+  (`dst_ip IN (...)`) e `detect_shared_destination` (lookup exato por
+  `dst_ip`+`dst_port`) caíam pro índice de `ts` e filtravam `dst_ip` linha a
+  linha; confirmado com `EXPLAIN QUERY PLAN` antes/depois. As queries por
+  `GROUP BY src_ip` não precisaram de índice novo — o de `ts` já restringe bem
+  à janela de detecção antes de agrupar.
 
 ### v1.1.0 — 2026-07-01 — CLI, alertas, IA, portal e detectores de correlação/reputação/DNS
 - Socket de controle + `clientguard-cli.py`.

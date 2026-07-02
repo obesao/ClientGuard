@@ -39,6 +39,12 @@ CREATE TABLE IF NOT EXISTS suspicious_clients (
 
 CREATE INDEX IF NOT EXISTS idx_client_flow_ts ON client_flow_aggs(ts);
 CREATE INDEX IF NOT EXISTS idx_client_flow_src ON client_flow_aggs(src_ip, ts);
+-- dst_ip líder: serve tanto o lookup exato (dst_ip, dst_port) do detect_shared_destination
+-- quanto o "dst_ip IN (...)" do detect_malicious_contact — sem isso, os dois caem pro
+-- índice de ts e filtram dst_ip linha a linha, o que piora conforme os 7 dias de
+-- retenção acumulam (ver EXPLAIN QUERY PLAN antes desta mudança: USE TEMP B-TREE FOR
+-- DISTINCT sobre o resultado de uma SEARCH por ts, não por dst_ip).
+CREATE INDEX IF NOT EXISTS idx_client_flow_dst ON client_flow_aggs(dst_ip, dst_port, ts);
 CREATE INDEX IF NOT EXISTS idx_suspicious_open ON suspicious_clients(src_ip, signal_type, resolved);
 """
 
