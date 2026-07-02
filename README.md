@@ -2,7 +2,7 @@
 
 **Versão atual: v1.2.0**
 
-Sistema de detecção de clientes comprometidos via NetFlow para o provedor POX Network.
+Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
 (sem competir pelo socket dele, sem tocar em nenhum arquivo daquele projeto), agrega por
 `src_ip` do cliente — não pelo prefixo de destino, que é o foco do FlowGuard — e roda
@@ -22,9 +22,10 @@ comprometidos (scan, spam, amplificação, C2, exfiltração).
    padrão do `flowguard-cli`: status, top clientes, sinais suspeitos, resolver
    sinal, whitelist e cadastro de clientes via terminal.
 5. **Cadastro de redes de clientes por CIDR** (`customers.yaml`) — deixou de
-   resolver por IP exato pra resolver por rede: a `/21` pública da POX dividida em
-   `/24`, e o pool CGNAT `100.64.0.0/10` atrás da caixa A10 (identifica o assinante
-   individual, não o IP público compartilhado por 32 clientes).
+   resolver por IP exato pra resolver por rede: o bloco `/21` público da operadora
+   dividido em `/24`, e o pool CGNAT `100.64.0.0/10` atrás do NAT de operadora
+   (identifica o assinante individual, não o IP público compartilhado por 32
+   clientes).
 6. **Whitelist** de IPs/serviços legítimos que nunca devem gerar alerta.
 7. **Alertas via webhook + explicação por IA** — cada sinal *novo* (não
    atualização de sinal já aberto) dispara webhook (`notifier.py`) e ganha uma
@@ -104,8 +105,8 @@ por quê" de cada leva de trabalho.
 ### v1.1.0 — 2026-07-01 — CLI, alertas, IA, portal e detectores de correlação/reputação/DNS
 - Socket de controle + `clientguard-cli.py`.
 - `customers.yaml` migrado de IP exato para CIDR (`network`).
-- Cadastradas as redes `177.86.16.0/21` (em 8×`/24`) e `100.64.0.0/10` (CGNAT A10).
-- Whitelist inicial (`177.86.16.36`).
+- Cadastradas as redes `x.x.x.0/21` (em 8×`/24`) e `100.64.0.0/10` (CGNAT).
+- Whitelist inicial (IP de gerência interno).
 - Alertas via webhook (`notifier.py`) — implementado, falta só a URL de destino.
 - Explicação de sinais via IA (`ai_client.py`, Claude Haiku).
 - Detector `malicious_contact` (feed de reputação próprio, `threat_feed.py`).
