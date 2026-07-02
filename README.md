@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.2.0**
+**Versão atual: v1.3.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -65,6 +65,13 @@ comprometidos (scan, spam, amplificação, C2, exfiltração).
 | `threat_feed.py` | Feed de reputação de IPs maliciosos |
 | `geoip.py` | Enriquecimento ASN/país via Team Cymru |
 | `tools/synth_client_flows.py` | Gerador de NetFlow sintético para testar os detectores |
+| `tests/` | Suíte pytest (57 testes) — detectores, storage, configio, threat feed, geoip |
+
+## Testes
+
+```
+./venv/bin/pytest        # 57 testes, ~2s, sem rede/captura real
+```
 
 ## Uso
 
@@ -81,6 +88,26 @@ clientguard-cli customers add|del <network> <prefix>
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.3.0 — 2026-07-01 — Endurecimento do systemd + suíte de testes automatizados
+- `clientguard.service`: `NoNewPrivileges`, `ProtectSystem=strict`,
+  `CapabilityBoundingSet` (só `CAP_NET_RAW`/`CAP_NET_ADMIN`, mesmo com `User=root`),
+  `SystemCallFilter` e demais `Protect*`/`Restrict*`. Testado incrementalmente
+  contra o serviço real (não só aplicado às cegas) — score do
+  `systemd-analyze security` foi de **9.6 UNSAFE pra 4.0 OK**.
+  - `ProtectHome=yes` foi tentado e removido: quebrava o `EXEC` do venv
+    (`venv/bin/python3` é symlink pra `/usr/bin/python3`) mesmo reabrindo o
+    diretório via `ReadWritePaths` — reproduzido isolado com `systemd-run`.
+  - `@privileged` ficou fora do `SystemCallFilter`: bloqueá-lo matava o processo
+    com `SIGSYS` no start, por interação com `CapabilityBoundingSet` nesta
+    versão do systemd/kernel.
+  - Captura via scapy, escrita de whitelist/customers e socket de controle
+    revalidados após cada mudança.
+- **Suíte pytest** (`tests/`, 57 testes) cobrindo os 7 detectores (acima/abaixo de
+  limiar, whitelist, dedup de sinal, reabertura após resolver), `storage.py`,
+  `configio.py`, `threat_feed.py`, `geoip.py` (rede mockada) e o matching CIDR de
+  `resolve_customer_prefix`. Validada com teste de mutação (quebrei a query do
+  scan horizontal e a lógica do amplificador de propósito — a suíte pegou os dois).
 
 ### v1.2.0 — 2026-07-01 — Cache de GeoIP persistente
 - `geoip_cache` (tabela SQLite nova) — o cache ASN/país deixa de ser só em
