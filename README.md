@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.6.0**
+**Versão atual: v1.7.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -89,6 +89,13 @@ clientguard-cli customers add|del <network> <prefix>
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.7.0 — 2026-07-02 — Bloqueio manual de IP via portal/CLI
+- Novo comando `block_add`/`block_del`/`block_list` no socket do daemon
+  (`clientguard-cli block add|del|list`) e endpoint no portal — bloqueia
+  cliente abusivo por src_prefix. É um proxy fino: a regra FlowSpec real
+  (com TTL, expiração etc.) é criada e vive só no FlowGuard, que é quem
+  fala BGP com o roteador; o ClientGuard nunca guarda estado próprio disso.
 
 ### v1.6.0 — 2026-07-02 — Status da sessão BGP do FlowGuard no CLI
 - `clientguard-cli status` e o monitor interativo passaram a mostrar
