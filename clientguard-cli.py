@@ -217,6 +217,34 @@ def cmd_customers_del(args: argparse.Namespace, sock_path: str) -> None:
     _print_simple(resp)
 
 
+def cmd_block_add(args: argparse.Namespace, sock_path: str) -> None:
+    resp = send_command(sock_path, {"cmd": "block_add", "ip": args.ip, "ttl_s": args.ttl_s})
+    _print_simple(resp, ok_message=f"{args.ip} bloqueado via FlowSpec (regra id={resp.get('rule_id')})")
+
+
+def cmd_block_del(args: argparse.Namespace, sock_path: str) -> None:
+    resp = send_command(sock_path, {"cmd": "block_del", "id": args.id})
+    _print_simple(resp, ok_message=f"regra {args.id} removida")
+
+
+def cmd_block_list(args: argparse.Namespace, sock_path: str) -> None:
+    resp = send_command(sock_path, {"cmd": "block_list"})
+    die_on_error(resp)
+    table = Table(title="IPs Bloqueados (FlowSpec via FlowGuard)")
+    table.add_column("ID")
+    table.add_column("Origem bloqueada")
+    table.add_column("Ação")
+    table.add_column("Expira em")
+    now = time.time()
+    for row in resp["blocks"]:
+        ttl = max(0, int(row["expires_at"] - now))
+        table.add_row(str(row["id"]), row["src_prefix"], row["action"], f"{ttl}s")
+    if not resp["blocks"]:
+        console.print("[green]Nenhum IP bloqueado no momento.[/green]")
+    else:
+        console.print(table)
+
+
 def cmd_reload(args: argparse.Namespace, sock_path: str) -> None:
     resp = send_command(sock_path, {"cmd": "reload"})
     _print_simple(resp, ok_message="config recarregado (clientes e whitelist)")
@@ -331,6 +359,18 @@ def main() -> None:
     p_cust_del = customers_sub.add_parser("del")
     p_cust_del.add_argument("network")
     p_cust_del.set_defaults(func=cmd_customers_del)
+
+    p_block = sub.add_parser("block", help="bloqueio manual de IP (FlowSpec via FlowGuard)")
+    block_sub = p_block.add_subparsers(dest="block_action", required=True)
+    p_block_add = block_sub.add_parser("add")
+    p_block_add.add_argument("ip", help="IP ou CIDR a bloquear (origem)")
+    p_block_add.add_argument("--ttl-s", type=int, default=None, dest="ttl_s",
+                              help="expira em N segundos (padrão: mitigation.default_ttl_s do FlowGuard)")
+    p_block_add.set_defaults(func=cmd_block_add)
+    p_block_del = block_sub.add_parser("del")
+    p_block_del.add_argument("id", type=int)
+    p_block_del.set_defaults(func=cmd_block_del)
+    block_sub.add_parser("list").set_defaults(func=cmd_block_list)
 
     sub.add_parser("reload").set_defaults(func=cmd_reload)
     sub.add_parser("stop").set_defaults(func=cmd_stop)

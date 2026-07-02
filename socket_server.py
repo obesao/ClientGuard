@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 import configio
+import control
 import storage
 
 LOG = logging.getLogger("clientguard.socket")
@@ -214,6 +215,47 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         configio.save_yaml_list(path, filtered, header_comment=CUSTOMERS_HEADER)
         d.reload_config()
         return {"ok": True}
+
+    # --- bloqueio manual de IP (proxy pro FlowSpec do FlowGuard) ------------
+    # ClientGuard não fala BGP nem tem seu próprio ExaBGP — só existe UMA sessão
+    # com o roteador. Bloquear um cliente abusivo é a mesma coisa que o FlowGuard
+    # já faz pra atacantes: uma regra FlowSpec discard por src_prefix. Por isso
+    # isso é um proxy fino pro socket do FlowGuard, sem tabela/TTL própria aqui —
+    # a regra "de verdade" (com expiração etc.) vive só em flowspec_rules do
+    # FlowGuard, sem duplicar/divergir estado.
+
+    def _fg_socket(self) -> str:
+        return self.daemon_ref.config.get("flowguard_socket", "/var/run/flowguard.sock")
+
+    def _cmd_block_add(self, request: dict) -> dict:
+        ip = request.get("ip")
+        if not ip:
+            return {"ok": False, "error": "ip obrigatório"}
+        try:
+            prefix = str(ipaddress.ip_network(ip, strict=False))
+        except ValueError:
+            return {"ok": False, "error": f"IP/CIDR inválido: {ip}"}
+        rule = {"src_prefix": prefix, "action": "discard", "label": "bloqueio manual via ClientGuard"}
+        payload = {"cmd": "flowspec_add", "rule": rule}
+        ttl_s = request.get("ttl_s")
+        if ttl_s:
+            payload["ttl_s"] = int(ttl_s)
+        return control.send_command(self._fg_socket(), payload)
+
+    def _cmd_block_del(self, request: dict) -> dict:
+        rule_id = request.get("id")
+        if not rule_id:
+            return {"ok": False, "error": "id obrigatório"}
+        return control.send_command(self._fg_socket(), {"cmd": "flowspec_del", "rule_id": rule_id})
+
+    def _cmd_block_list(self, request: dict) -> dict:
+        resp = control.send_command(self._fg_socket(), {"cmd": "rules"})
+        if not resp.get("ok"):
+            return resp
+        # só regras de bloqueio por origem (discard/rate-limit) — RTBH é o
+        # mecanismo de proteção de vítima do FlowGuard, não bloqueio de cliente
+        blocks = [r for r in resp.get("rules", []) if r.get("src_prefix") and r.get("action") != "rtbh"]
+        return {"ok": True, "blocks": blocks}
 
     def _cmd_reload(self, request: dict) -> dict:
         self.daemon_ref.reload_config()

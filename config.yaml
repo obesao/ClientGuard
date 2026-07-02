@@ -3,9 +3,11 @@
 daemon:
   socket: /var/run/clientguard.sock   # socket de controle consumido pelo clientguard-cli
 
-# Só pra clientguard-cli consultar o status da sessão BGP (Up/Down) do FlowGuard —
-# BGP é gerenciado 100% pelo FlowGuard/ExaBGP, isso é só leitura via socket, sem
-# nenhum código ou config compartilhado além disso.
+# Socket do daemon FlowGuard — usado pra (1) consultar status da sessão BGP
+# (Up/Down) e (2) bloqueio manual de cliente abusivo, que é só uma regra
+# FlowSpec (discard por src_prefix) pedida pro FlowGuard anunciar — só ele fala
+# BGP com o roteador (uma sessão só), o ClientGuard nunca guarda essa regra
+# localmente nem tem TTL próprio pra ela.
 flowguard_socket: /var/run/flowguard.sock
 
 capture:
