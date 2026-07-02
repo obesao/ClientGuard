@@ -20,6 +20,13 @@ import storage
 
 LOG = logging.getLogger("clientguard.socket")
 
+# Protege o read-modify-write de toggles.yaml — o socket atende conexões em threads
+# de verdade (ThreadingUnixStreamServer, não asyncio), então duas chamadas concorrentes
+# (ex.: o botão "Aplicar novas configurações" do portal mandando vários toggles de uma
+# vez, ou CLI + portal ao mesmo tempo) poderiam intercalar leitura/escrita e perder uma
+# mudança sem isso. Lock dedicado (não db_lock) porque não protege o SQLite, só este arquivo.
+_TOGGLES_LOCK = threading.Lock()
+
 WHITELIST_HEADER = (
     "# whitelist.yaml — src_ip/prefixos que NUNCA devem gerar alerta no ClientGuard\n"
     "# (servidores de e-mail/DNS/NTP legítimos de clientes corporativos, backups, etc.)\n"
@@ -165,13 +172,25 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
 
     def _cmd_set_toggle(self, request: dict) -> dict:
         key = request.get("key")
-        if key not in configio.DEFAULT_FEATURE_TOGGLES:
-            return {"ok": False, "error": f"toggle desconhecido: {key}"}
+        return self._cmd_set_toggles({"toggles": {key: request.get("value")}})
+
+    def _cmd_set_toggles(self, request: dict) -> dict:
+        """Aplica várias mudanças de toggle numa única leitura+escrita atômica — usado
+        pelo botão "Aplicar novas configurações" do portal (1 requisição pra todas as
+        funções marcadas, em vez de 1 por checkbox) e reaproveitado por _cmd_set_toggle
+        (1 chave só) pra os dois caminhos passarem pelo mesmo lock."""
+        changes = request.get("toggles")
+        if not isinstance(changes, dict) or not changes:
+            return {"ok": False, "error": "toggles (objeto não vazio) obrigatório"}
         d = self.daemon_ref
         path = d.config.get("feature_toggles_file", "")
         if not path:
             return {"ok": False, "error": "feature_toggles_file não configurado"}
-        updated = configio.save_feature_toggle(path, key, bool(request.get("value")))
+        try:
+            with _TOGGLES_LOCK:
+                updated = configio.save_feature_toggles(path, changes)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
         d.reload_config()
         return {"ok": True, "toggles": updated}
 

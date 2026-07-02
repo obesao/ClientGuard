@@ -5,7 +5,7 @@ scan_horizontal: true
 scan_vertical: true
 amplifier: true
 spam: true
-malicious_contact: true
+malicious_contact: false
 coordinated_destination: true
 dns_tunneling: true
 ai_explanations: true

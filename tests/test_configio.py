@@ -65,3 +65,35 @@ def test_save_feature_toggle_unknown_key_raises(tmp_path):
     path = tmp_path / "toggles.yaml"
     with pytest.raises(ValueError):
         configio.save_feature_toggle(str(path), "nao_existe", True)
+
+
+def test_save_feature_toggles_applies_all_in_one_write(tmp_path):
+    path = tmp_path / "toggles.yaml"
+    updated = configio.save_feature_toggles(str(path), {"amplifier": False, "spam": False})
+    assert updated["amplifier"] is False
+    assert updated["spam"] is False
+    reloaded = configio.load_feature_toggles(str(path))
+    assert reloaded["amplifier"] is False
+    assert reloaded["spam"] is False
+    assert reloaded["dns_tunneling"] is True  # não tocado, continua no default
+
+
+def test_save_feature_toggles_unknown_key_raises_and_writes_nothing(tmp_path):
+    path = tmp_path / "toggles.yaml"
+    with pytest.raises(ValueError):
+        configio.save_feature_toggles(str(path), {"amplifier": False, "nao_existe": True})
+    # validação falha ANTES de qualquer escrita — nem a chave válida deve ter sido aplicada
+    assert not path.exists()
+
+
+def test_save_feature_toggles_does_not_lose_concurrent_style_batch(tmp_path):
+    """Regressão: aplicar várias chaves numa função só (1 read+write) não pode perder
+    nenhuma delas — o cenário que save_feature_toggle (1 chamada por chave) permitia sob
+    concorrência real (ThreadingUnixStreamServer no ClientGuard)."""
+    path = tmp_path / "toggles.yaml"
+    changes = {"scan_horizontal": False, "scan_vertical": False, "amplifier": False,
+               "spam": False, "malicious_contact": False, "coordinated_destination": False,
+               "dns_tunneling": False, "ai_explanations": False}
+    updated = configio.save_feature_toggles(str(path), changes)
+    assert updated == {k: False for k in configio.DEFAULT_FEATURE_TOGGLES}
+    assert configio.load_feature_toggles(str(path)) == updated
