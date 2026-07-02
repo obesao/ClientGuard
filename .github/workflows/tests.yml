@@ -1,0 +1,26 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Só o que a suíte de testes precisa de verdade — scapy/anthropic/rich são do
+      # daemon/CLI em produção, não são importados por nenhum módulo exercitado
+      # pelos testes (confirmado bloqueando scapy manualmente antes de criar isso).
+      - name: Instala dependências de teste
+        run: pip install pytest pyyaml
+
+      - name: Roda a suíte
+        run: pytest -v

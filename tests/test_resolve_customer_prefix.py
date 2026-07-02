@@ -4,7 +4,7 @@ de só IPs exatos."""
 
 from __future__ import annotations
 
-from clientguard import resolve_customer_prefix
+from customer_registry import resolve_customer_prefix
 
 CUSTOMERS = [
     {"network": "177.86.16.0/24", "prefix": "177.86.16.0/24"},

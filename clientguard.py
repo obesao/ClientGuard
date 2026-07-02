@@ -5,7 +5,6 @@ prefixo de destino) e grava em SQLite próprio."""
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 import queue
 import sys
@@ -27,27 +26,11 @@ import geoip
 import socket_server
 import storage
 import threat_feed
+from customer_registry import resolve_customer_prefix
 
 LOG = logging.getLogger("clientguard")
 
 DEFAULT_CONFIG_PATH = str(Path(__file__).resolve().parent / "config.yaml")
-
-
-def resolve_customer_prefix(src_ip: str, customers: list[dict]) -> str | None:
-    try:
-        addr = ipaddress.ip_address(src_ip)
-    except ValueError:
-        return None
-    for c in customers:
-        network = c.get("network")
-        if not network:
-            continue
-        try:
-            if addr in ipaddress.ip_network(network, strict=False):
-                return c.get("prefix")
-        except ValueError:
-            continue
-    return None
 
 
 class ClientGuardDaemon:

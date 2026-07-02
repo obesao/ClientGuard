@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.3.0**
+**Versão atual: v1.4.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -57,6 +57,7 @@ comprometidos (scan, spam, amplificação, C2, exfiltração).
 | `detector.py` | Os 7 detectores |
 | `storage.py` | Schema e acesso ao SQLite |
 | `configio.py` | Leitura/gravação de `customers.yaml`/`whitelist.yaml` |
+| `customer_registry.py` | `resolve_customer_prefix` (matching CIDR) — sem dependência de scapy/FlowGuard, importável isoladamente |
 | `socket_server.py` | Servidor de controle (Unix socket, protocolo JSON por linha) |
 | `clientguard-cli.py` | Cliente de terminal |
 | `control.py` | Client mínimo do socket, usado pelos CGI scripts do portal |
@@ -88,6 +89,18 @@ clientguard-cli customers add|del <network> <prefix>
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.4.0 — 2026-07-01 — CI no GitHub Actions
+- `customer_registry.py` (novo) — `resolve_customer_prefix` extraído de
+  `clientguard.py` pra um módulo sem dependência de scapy/FlowGuard. Não era só
+  organização: `clientguard.py` importa scapy e insere `/root/flowguard` no
+  `sys.path` no topo do arquivo — isso quebraria os testes num runner do GitHub,
+  que não tem nem um nem outro. Confirmado bloqueando `scapy` manualmente antes e
+  depois da extração.
+- `.github/workflows/tests.yml` — roda os 57 testes a cada push/PR na `main`. Só
+  instala `pytest`+`pyyaml` (não o `requirements.txt` inteiro) — nenhum módulo
+  exercitado pelos testes precisa de scapy/anthropic/rich.
+- `requirements.txt`/`requirements-dev.txt` novos (não existiam antes).
 
 ### v1.3.0 — 2026-07-01 — Endurecimento do systemd + suíte de testes automatizados
 - `clientguard.service`: `NoNewPrivileges`, `ProtectSystem=strict`,
