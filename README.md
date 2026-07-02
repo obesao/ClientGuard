@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.5.1**
+**Versão atual: v1.6.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -89,6 +89,12 @@ clientguard-cli customers add|del <network> <prefix>
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.6.0 — 2026-07-02 — Status da sessão BGP do FlowGuard no CLI
+- `clientguard-cli status` e o monitor interativo passaram a mostrar
+  "BGP (FlowGuard/ExaBGP): Up" ou "Down/Idle", consultando o comando
+  `bgp_status` do socket do FlowGuard (`flowguard_socket` em `config.yaml`,
+  só leitura — BGP continua 100% gerenciado pelo FlowGuard).
 
 ### v1.5.1 — 2026-07-02 — Renumeração do link com o roteador de borda
 - IP do link ponto-a-ponto com o roteador de borda mudou; comentário de
