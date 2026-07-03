@@ -88,8 +88,10 @@ class ClientGuardDaemon:
             return
         payload = bytes(pkt["UDP"].payload)
         peer = pkt["IP"].src if pkt.haslayer("IP") else "?"
+        cap_cfg = self.config["capture"]
+        sampling_rate = cap_cfg.get("sampling_rate_by_peer", {}).get(peer, cap_cfg["sampling_rate"])
         try:
-            records = parse_packet(payload, peer, self.template_store, self.config["capture"]["sampling_rate"])
+            records = parse_packet(payload, peer, self.template_store, sampling_rate)
         except Exception:
             LOG.exception("erro ao parsear pacote NetFlow de %s", peer)
             return

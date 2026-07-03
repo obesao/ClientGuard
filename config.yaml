@@ -19,8 +19,24 @@ capture:
   # recebe via bind de socket (não depende de interface), só a captura passiva
   # do ClientGuard (scapy.sniff) é sensível a isso.
   iface: ens18
-  bpf_filter: "udp port 2055"   # mesmo tráfego que já chega pro FlowGuard, só observado
+  # 2055: mesmo tráfego que já chega pro FlowGuard (NE8000), só observado.
+  # 2056: NetFlow do A10 (CGNAT) — confirmado por captura real (2026-07-03) que
+  # o src_ip aqui é PRÉ-NAT (IP interno do cliente em 100.64.0.0/16, não o IP
+  # público compartilhado), então cada cliente já chega identificável sem
+  # precisar de client_multiplier.
+  bpf_filter: "udp port 2055 or udp port 2056"
   sampling_rate: 1000            # mesmo valor do NE8000 usado pelo FlowGuard (collector.sampling_rate)
+  # sampling_rate_by_peer: sobrescreve sampling_rate acima por IP de origem do
+  # export (peer) — necessário porque o A10 não preenche o campo
+  # SAMPLING_INTERVAL (34) do NetFlow, então sem isso ele herdaria o 1000 do
+  # NE8000, que está errado pra ele. 177.86.23.234 (A10, confirmado via
+  # tcpdump 2026-07-03) não tem sampling configurado no equipamento ("Records
+  # 1000"/"Time 1800s"/"Flow timeout 10" são parâmetros de exportação, não uma
+  # taxa de amostragem) — assumindo 1:1 (sem amostragem), típico de log de
+  # CGNAT pra resolver abuso por IP+porta+timestamp. CONFIRMAR com o
+  # equipamento se isso mudar.
+  sampling_rate_by_peer:
+    "177.86.23.234": 1
 
 database:
   path: /root/clientguard/db/client_flow.sqlite
