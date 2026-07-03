@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.14.0**
+**Versão atual: v1.15.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,29 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.15.0 — 2026-07-02 — Corrige driver Netmiko: mitigação de borda não estava aplicando de verdade
+- **Bug real** (mesma causa raiz documentada no CHANGELOG do `flowguard`):
+  `warmode.yaml` tinha o equipamento `NE8000BGP` com `device_type:
+  huawei_vrp`, mas esse NE8000 de carrier usa o modelo de config candidata
+  do VRP — ao aplicar uma ACL via `edge_mitigation.py`
+  (`conn.send_config_set(...)`), o equipamento pergunta interativamente se
+  deve commitar antes de sair do modo de configuração, e o driver
+  `huawei_vrp` não sabe responder isso: a chamada travava até o timeout
+  (`Pattern not detected: '>' in output`), sempre falhando. Como
+  `apply_and_record` só grava em `edge_mitigations` quando a aplicação
+  funciona, TODA tentativa de mitigação na borda falhava silenciosamente —
+  sem erro visível na aba ClientGuard do portal e sem aparecer em nenhuma
+  lista, só no audit log (`logs/edge-audit.jsonl`).
+- Corrigido trocando `device_type` pra `huawei_vrpv8` em `warmode.yaml`
+  (fora do git, ajuste direto no servidor). Validado ponta a ponta contra o
+  equipamento real: `edge_mitigation.apply_block()`/`revert_block()`
+  aplicaram e removeram uma regra de ACL de teste (prefixo RFC 5737) com
+  sucesso pela primeira vez.
+- **Se você aplicou uma mitigação pela aba ClientGuard antes desta correção
+  e ela não apareceu em lugar nenhum, é esse bug — não era um problema de
+  onde procurar na tela, o comando SSH nunca chegou a aplicar nada de
+  verdade no equipamento.**
 
 ### v1.14.0 — 2026-07-02 — `block_add` marca `origin: clientguard` pro FlowGuard
 Base pra aba "Regras" unificada do portal (histórico de toda interação com a
