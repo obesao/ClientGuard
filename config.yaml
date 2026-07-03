@@ -25,20 +25,24 @@ capture:
   # fila interna do daemon (200k, drenada 1x por ciclo de 30s), descartando
   # dezenas de milhares de flows/min. Vamos receber via NE8000-PPPOE (Huawei)
   # na porta 2060 em vez disso.
-  # 2060: NetFlow do NE8000-PPPOE (Huawei) — em teste 2026-07-03. Ainda não
-  # confirmado se vem pré ou pós-NAT nem a taxa de sampling real (ver
-  # sampling_rate_by_peer abaixo, placeholder até a captura real confirmar).
+  # 2060: NetFlow do NE8000-PPPOE (Huawei), peer 177.86.23.225 (confirmado via
+  # tcpdump 2026-07-03, IP de export — diferente do IP de gerência SSH usado no
+  # warmode.yaml). Volume bem menor que o A10 (~155 flows/s vs ~6300/s), sem
+  # risco de estourar a fila interna. Mistura tráfego de clientes CGNAT
+  # (src_ip em 100.64.0.0/16, pré-NAT — 42% dos registros numa amostra) e de
+  # clientes com IP público direto (177.86.16.0/24 etc, já cadastrados em
+  # customers.yaml) — faz sentido, é o agregador de sessões PPPoE, não só CGNAT.
   bpf_filter: "udp port 2055 or udp port 2060"
   sampling_rate: 1000            # mesmo valor do NE8000 usado pelo FlowGuard (collector.sampling_rate)
   # sampling_rate_by_peer: sobrescreve sampling_rate acima por IP de origem do
   # export (peer) — necessário quando o exportador não preenche o campo
-  # SAMPLING_INTERVAL (34) do NetFlow (caso do A10, pausado acima) e a taxa
-  # real difere do valor global (calibrado pro NE8000/FlowGuard em 2055).
-  # A entrada do A10 (177.86.23.234) foi removida junto com a pausa da porta
-  # 2056 — sem tráfego chegando ali, a chave ficaria morta/confusa no config.
-  # PENDENTE: confirmar via captura real se o NE8000-PPPOE (porta 2060)
-  # preenche o campo de sampling sozinho ou precisa de uma entrada aqui.
-  sampling_rate_by_peer: {}
+  # SAMPLING_INTERVAL (34) do NetFlow e a taxa real difere do valor global
+  # (calibrado pro NE8000/FlowGuard em 2055). 177.86.23.225 (NE8000-PPPOE) não
+  # preenche esse campo (confirmado via captura real) — assumindo 1:1 (sem
+  # amostragem), mesma lógica aplicada ao A10 (log completo de sessão, não
+  # telemetria amostrada). CONFIRMAR com o equipamento se isso mudar.
+  sampling_rate_by_peer:
+    "177.86.23.225": 1
 
 database:
   path: /root/clientguard/db/client_flow.sqlite
