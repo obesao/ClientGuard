@@ -4,7 +4,7 @@ do FlowGuard de verdade). Mesmo padrão de tests/test_edge_mitigation.py."""
 from __future__ import annotations
 
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -23,6 +23,18 @@ def _cfg(**overrides):
     cfg = fm.load_config("/caminho/que/nao/existe.yaml")  # cai no DEFAULT_CONFIG
     cfg.update(overrides)
     return cfg
+
+
+def _write_warmode_yaml(tmp_path, device_name="HUAWEI-PPPOE-222"):
+    flowguard_dir = tmp_path / "flowguard"
+    flowguard_dir.mkdir()
+    (flowguard_dir / "warmode.yaml").write_text(
+        f"devices:\n  - name: \"{device_name}\"\n    host: 10.0.0.1\n    port: 22\n"
+        "    device_type: huawei_vrpv8\n    username: poxnet\n    password: secret\n"
+        "    enable_mode: false\n",
+        encoding="utf-8",
+    )
+    return str(flowguard_dir)
 
 
 # --- load_config / save_auto_mitigate -------------------------------------
@@ -260,3 +272,136 @@ def test_expire_due_only_processes_flowspec_mechanism(conn):
     mock.assert_called_once()
     assert storage.get_edge_mitigation(conn, flowspec_id)["status"] == "reverted"
     assert storage.get_edge_mitigation(conn, ssh_id)["status"] == "active"  # não é problema deste módulo
+
+
+# --- bypass do CGNAT/PBR (achado real 2026-07-03) --------------------------
+
+def test_cidr_to_huawei_host():
+    assert fm._cidr_to_huawei("1.2.3.4/32") == ("1.2.3.4", "0")
+
+
+def test_cidr_to_huawei_network():
+    assert fm._cidr_to_huawei("1.2.3.0/24") == ("1.2.3.0", "0.0.0.255")
+
+
+def test_bypass_rule_clause_ip_only():
+    rule = {"src_prefix": "100.64.1.2/32", "action": "discard"}
+    assert fm._bypass_rule_clause(rule, 50001) == "rule 50001 permit ip source 100.64.1.2 0"
+
+
+def test_bypass_rule_clause_mirrors_destination_and_port_never_wider():
+    # mesmo escopo exato da regra FlowSpec — nunca mais amplo, senão isenta do
+    # CGNAT tráfego do cliente que a mitigação nunca mirou (pedido explícito do
+    # usuário: cliente tem que continuar navegando).
+    rule = {"src_prefix": "100.64.1.2/32", "dst_prefix": "177.86.16.9/32",
+            "protocol": "udp", "dst_port": "25252", "action": "discard"}
+    clause = fm._bypass_rule_clause(rule, 50002)
+    assert clause == ("rule 50002 permit udp source 100.64.1.2 0 "
+                       "destination 177.86.16.9 0 destination-port eq 25252")
+
+
+def test_bypass_rule_clause_dst_port_ignored_without_tcp_udp():
+    rule = {"src_prefix": "100.64.1.2/32", "dst_port": "53", "action": "discard"}
+    # sem protocol tcp/udp explícito, "destination-port" não é uma cláusula válida
+    # de ACL "ip" — melhor omitir do que gerar um comando que o roteador rejeita
+    assert "destination-port" not in fm._bypass_rule_clause(rule, 50003)
+
+
+def test_push_pbr_bypass_disabled_by_default_skips_ssh(tmp_path):
+    cfg = _cfg()
+    assert cfg["pbr_bypass"]["enabled"] is False
+    with patch("netmiko.ConnectHandler") as mock_handler:
+        result = fm.push_pbr_bypass({"src_prefix": "100.64.1.2/32", "action": "discard"}, 1,
+                                     cfg, str(tmp_path / "flowguard"))
+    assert result == {"ok": True, "skipped": "pbr_bypass_disabled"}
+    mock_handler.assert_not_called()
+
+
+def test_push_pbr_bypass_enabled_sends_expected_commands(tmp_path):
+    flowguard_path = _write_warmode_yaml(tmp_path)
+    cfg = _cfg(pbr_bypass={"enabled": True, "warmode_device": "HUAWEI-PPPOE-222",
+                            "acl_number": 3001, "rule_id_base": 50000})
+    fake_conn = MagicMock()
+    fake_conn.send_config_set.return_value = "ok"
+    with patch("netmiko.ConnectHandler", return_value=fake_conn) as mock_handler:
+        result = fm.push_pbr_bypass(
+            {"src_prefix": "100.64.1.2/32", "dst_prefix": "177.86.16.9/32", "action": "discard"},
+            184, cfg, flowguard_path,
+        )
+    assert result["ok"] is True
+    mock_handler.assert_called_once()
+    sent = fake_conn.send_config_set.call_args[0][0]
+    assert sent == [
+        "acl number 3001",
+        "rule 50184 permit ip source 100.64.1.2 0 destination 177.86.16.9 0",
+        "quit", "commit",
+    ]
+
+
+def test_remove_pbr_bypass_enabled_sends_undo(tmp_path):
+    flowguard_path = _write_warmode_yaml(tmp_path)
+    cfg = _cfg(pbr_bypass={"enabled": True, "warmode_device": "HUAWEI-PPPOE-222",
+                            "acl_number": 3001, "rule_id_base": 50000})
+    fake_conn = MagicMock()
+    fake_conn.send_config_set.return_value = "ok"
+    with patch("netmiko.ConnectHandler", return_value=fake_conn):
+        result = fm.remove_pbr_bypass(184, cfg, flowguard_path)
+    assert result["ok"] is True
+    sent = fake_conn.send_config_set.call_args[0][0]
+    assert sent == ["acl number 3001", "undo rule 50184", "quit", "commit"]
+
+
+def test_apply_and_record_pushes_pbr_bypass_when_enabled(tmp_path, conn):
+    flowguard_path = _write_warmode_yaml(tmp_path)
+    cfg = _cfg(pbr_bypass={"enabled": True, "warmode_device": "HUAWEI-PPPOE-222",
+                            "acl_number": 3001, "rule_id_base": 50000})
+    fake_conn = MagicMock()
+    fake_conn.send_config_set.return_value = "ok"
+    with patch("control.send_command", return_value={"ok": True, "rule_id": 184}), \
+         patch("netmiko.ConnectHandler", return_value=fake_conn) as mock_handler:
+        result = fm.apply_and_record(conn, None, "100.64.1.2", None, "port_scan_horizontal",
+                                      {"dst_port": "25252", "protocol": "udp"}, 3600, "auto", cfg,
+                                      "/fake.sock", flowguard_path=flowguard_path)
+    assert result["ok"] is True
+    mock_handler.assert_called_once()
+    sent = fake_conn.send_config_set.call_args[0][0]
+    assert sent == [
+        "acl number 3001",
+        "rule 50184 permit udp source 100.64.1.2 0 destination-port eq 25252",
+        "quit", "commit",
+    ]
+
+
+def test_apply_and_record_does_not_touch_ssh_when_pbr_bypass_disabled(conn):
+    cfg = _cfg()  # pbr_bypass.enabled = False (default)
+    with patch("control.send_command", return_value={"ok": True, "rule_id": 1}), \
+         patch("netmiko.ConnectHandler") as mock_handler:
+        fm.apply_and_record(conn, None, "1.2.3.4", None, "port_scan_horizontal", None,
+                             3600, "auto", cfg, "/fake.sock")
+    mock_handler.assert_not_called()
+
+
+def test_revert_and_record_removes_pbr_bypass_when_enabled(tmp_path, conn):
+    flowguard_path = _write_warmode_yaml(tmp_path)
+    cfg = _cfg(pbr_bypass={"enabled": True, "warmode_device": "HUAWEI-PPPOE-222",
+                            "acl_number": 3001, "rule_id_base": 50000})
+    mitigation_id = storage.insert_edge_mitigation(conn, "100.64.1.2", None, 3600, "auto",
+                                                     mechanism="flowspec", flowspec_rule_id=184)
+    fake_conn = MagicMock()
+    fake_conn.send_config_set.return_value = "ok"
+    with patch("control.send_command", return_value={"ok": True}), \
+         patch("netmiko.ConnectHandler", return_value=fake_conn) as mock_handler:
+        result = fm.revert_and_record(conn, None, mitigation_id, "/fake.sock", cfg, flowguard_path)
+    assert result["ok"] is True
+    mock_handler.assert_called_once()
+    sent = fake_conn.send_config_set.call_args[0][0]
+    assert sent == ["acl number 3001", "undo rule 50184", "quit", "commit"]
+
+
+def test_revert_and_record_skips_pbr_bypass_when_cfg_not_passed(conn):
+    mitigation_id = storage.insert_edge_mitigation(conn, "100.64.1.2", None, 3600, "auto",
+                                                     mechanism="flowspec", flowspec_rule_id=184)
+    with patch("control.send_command", return_value={"ok": True}), \
+         patch("netmiko.ConnectHandler") as mock_handler:
+        fm.revert_and_record(conn, None, mitigation_id, "/fake.sock")  # sem cfg (compat)
+    mock_handler.assert_not_called()

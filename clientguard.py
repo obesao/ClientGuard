@@ -230,7 +230,8 @@ class ClientGuardDaemon:
         flowguard_path = self.config.get("flowguard_reuse", {}).get("path", "/root/flowguard")
         fg_socket_path = self.config.get("flowguard_socket", "/var/run/flowguard.sock")
         expired_ssh = edge_mitigation.expire_due(self.conn, self.db_lock, self.edge_cfg, flowguard_path)
-        expired_flowspec = flowspec_mitigation.expire_due(self.conn, self.db_lock, fg_socket_path)
+        expired_flowspec = flowspec_mitigation.expire_due(
+            self.conn, self.db_lock, fg_socket_path, self.flowspec_mitigation_cfg, flowguard_path)
         expired = expired_ssh + expired_flowspec
         if expired:
             LOG.info("mitigação de borda: %d regra(s) revertida(s) por TTL vencido (%d ssh, %d flowspec)",

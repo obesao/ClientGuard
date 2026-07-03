@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.18.0**
+**Versão atual: v1.19.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,64 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.19.0 — 2026-07-03 — FlowSpec era "aplicado" mas não bloqueava de verdade (PBR)
+Usuário reportou: mitigação FlowSpec aparecia "ativa" no banco/portal, mas o
+cliente não era bloqueado de verdade — testado e confirmado por ele. Diagnóstico
+via SSH read-only na caixa PPPoE (`HUAWEI-PPPOE-222`, credenciais já em
+`warmode.yaml` do FlowGuard) + captura real do NetFlow:
+
+- **BGP FlowSpec estava sendo entregue corretamente** — `display bgp flow peer
+  10.77.10.2 verbose` mostrou as rotas recebidas e válidas (`* >`), batendo
+  exatamente com as regras ativas do FlowGuard (a checagem inicial com
+  `display bgp peer ... verbose` sem `flow` só mostra a AFI unicast, vazia
+  nesta sessão — pareceu "0 recebidas" por engano).
+- **Causa raiz real**: a caixa PPPoE tem uma `traffic-policy P-CGNAT` GLOBAL
+  (`inbound global-acl`) que redireciona todo tráfego de cliente pro A10
+  (CGNAT) com precedência MAIOR que o filtro instalado pelo FlowSpec.
+  Confirmado com dado real: um cliente com regra `discard` ativa e válida no
+  roteador continuava gerando tráfego pro alvo que deveria estar bloqueado,
+  inclusive chegando até o IP interno do A10 (`10.71.71.4`).
+- A própria política já tinha uma válvula de escape: o classificador
+  `C-CGNAT-BYPASS` (ACL 3001), precedência mais alta, comportamento vazio
+  (não redireciona — tráfego cai na rota normal, onde o FlowSpec finalmente
+  atua).
+- **Restrição do usuário, crítica pro design**: a mitigação não pode tirar o
+  cliente do ar — só o tráfego sujo deve ser bloqueado, o resto continua
+  navegando normal. Por isso a exceção na ACL 3001 **espelha exatamente o
+  mesmo match da regra FlowSpec** (`_bypass_rule_clause`, novo) — nunca mais
+  amplo (mesmo src+dst+protocolo+porta que já estava sendo bloqueado) — só
+  aquele fluxo específico sai do redirecionamento pro CGNAT, o resto do
+  tráfego do cliente continua sendo traduzido e saindo normalmente.
+- `flowspec_mitigation.py` ganha `pbr_bypass` (novo, desabilitado por padrão
+  em `DEFAULT_CONFIG` — habilitado manualmente em produção após validação):
+  `push_pbr_bypass`/`remove_pbr_bypass` reaproveitam
+  `edge_mitigation._run_commands` (mesma conexão SSH/Netmiko já usada pelo
+  mecanismo legado) pra inserir/remover, via `rule_id_base + flowspec_rule_id`
+  (determinístico, sem precisar consultar o roteador pra saber o ID
+  atribuído), uma regra na ACL configurada (`acl_number`, `warmode_device`).
+  Acionado automaticamente dentro de `apply_and_record`/`revert_and_record`/
+  `expire_due` — nenhuma mudança de comportamento pra quem não habilitar
+  `pbr_bypass.enabled`.
+- **Achado de plataforma**: VRP V8 (NE8000, `huawei_vrpv8`) usa modelo de
+  candidate-config — precisa de `commit` explícito depois de editar a ACL
+  (confirmado nos comandos manuais que o usuário já usava em `warmode.yaml`).
+  `send_config_set` do Netmiko entra/sai de `system-view`/ACL automaticamente,
+  mas `quit` (sair da sub-view da ACL) + `commit` explícitos são incluídos em
+  todo comando gerado por este módulo.
+- Validado em produção: aplicado retroativamente (backfill manual, script
+  avulso) nas 7 mitigações FlowSpec já ativas no momento — confirmado via
+  `display acl 3001` que as 7 regras (50181-50188) foram commitadas, e via
+  `client_flow_aggs` que os 7 clientes deixaram de gerar tráfego pro alvo/porta
+  específicos que estavam sendo escaneados enquanto continuavam gerando
+  tráfego normal (navegação) sem interrupção. Sem teste controlado
+  ponta-a-ponta (não dá pra gerar tráfego como se fosse o cliente real a
+  partir daqui) — correlação temporal forte (7/7 pararam simultaneamente ao
+  aplicar o fix), mas não 100% definitivo; sugerido ao usuário validar com um
+  teste ao vivo próprio se quiser certeza total.
+- 189 testes pytest (12 novos: tradução CIDR→wildcard Huawei, montagem da
+  cláusula de ACL espelhando o match do FlowSpec, push/remove via SSH mockado,
+  integração com `apply_and_record`/`revert_and_record`).
 
 ### v1.18.0 — 2026-07-03 — Mitigação de port scan mais precisa + 2 bugs reais
 - Antes, mitigar um scan (discard ou rate_limit) sempre mirava o cliente

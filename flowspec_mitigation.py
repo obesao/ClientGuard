@@ -36,6 +36,7 @@ forçando peer='pppoe' neste único ponto de anúncio."""
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import math
@@ -47,6 +48,7 @@ from pathlib import Path
 import yaml
 
 import control
+import edge_mitigation
 import storage
 
 LOG = logging.getLogger("clientguard.flowspec_mitigation")
@@ -73,6 +75,25 @@ DEFAULT_CONFIG = {
         "malicious_contact": "off",
         "coordinated_destination": "off",
     },
+    # Achado real 2026-07-03: a caixa PPPoE tem uma traffic-policy GLOBAL
+    # (P-CGNAT) que redireciona todo tráfego de cliente pro A10 (CGNAT) com
+    # precedência MAIOR que o filtro instalado pelo FlowSpec — confirmado com
+    # captura real (cliente com regra 'discard' ativa e válida no roteador
+    # continuava passando tráfego até o A10). A própria política já tem uma
+    # exceção pronta: o classificador C-CGNAT-BYPASS (ACL 3001), precedência
+    # mais alta, com comportamento vazio (não redireciona). Quando habilitado,
+    # toda vez que uma regra FlowSpec é anunciada/retirada, empurramos (via SSH,
+    # reaproveitando warmode.yaml do FlowGuard) uma entrada espelhando o MESMO
+    # match da regra FlowSpec nessa ACL — nunca mais amplo, pra não isentar do
+    # CGNAT tráfego do cliente que a mitigação não mirava (cliente continua
+    # navegando normalmente, só o tráfego já sinalizado como sujo sai do
+    # redirecionamento e passa a ser filtrado pelo FlowSpec).
+    "pbr_bypass": {
+        "enabled": False,
+        "warmode_device": "HUAWEI-PPPOE-222",
+        "acl_number": 3001,
+        "rule_id_base": 50000,
+    },
 }
 
 
@@ -82,8 +103,9 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> dict:
         return json.loads(json.dumps(DEFAULT_CONFIG))  # cópia funda
     data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     merged = json.loads(json.dumps(DEFAULT_CONFIG))
-    merged.update({k: v for k, v in data.items() if k != "auto_mitigate"})
+    merged.update({k: v for k, v in data.items() if k not in ("auto_mitigate", "pbr_bypass")})
     merged["auto_mitigate"].update(data.get("auto_mitigate") or {})
+    merged["pbr_bypass"].update(data.get("pbr_bypass") or {})
     return merged
 
 
@@ -171,10 +193,74 @@ def _existing_kind(row: dict) -> str:
     return "discard" if row.get("rate_limit_bps") is None else "rate_limit"
 
 
+# --- exceção na ACL de bypass do CGNAT (achado 2026-07-03) -----------------
+
+def _cidr_to_huawei(prefix: str) -> tuple[str, str]:
+    """CIDR -> (endereço, máscara-curinga) na notação de ACL avançada Huawei VRP
+    — /32 vira '0' (confirmado no ACL real da caixa: 'destination 177.86.16.9 0'),
+    qualquer outro prefixo vira o dotted-quad invertido (wildcard mask)."""
+    net = ipaddress.ip_network(prefix, strict=False)
+    if net.prefixlen == 32:
+        return str(net.network_address), "0"
+    return str(net.network_address), str(net.hostmask)
+
+
+def _bypass_rule_clause(rule: dict, rule_id: int) -> str:
+    """Traduz o MESMO match da regra FlowSpec (src_prefix/dst_prefix/protocol/
+    dst_port) pra sintaxe de ACL avançada Huawei VRP — deliberadamente nunca mais
+    amplo que a regra FlowSpec original: só o tráfego que a mitigação já mirava
+    sai do redirecionamento pro CGNAT, o resto do cliente continua navegando
+    normalmente através do A10."""
+    protocol = rule.get("protocol")
+    proto_kw = protocol if protocol in ("tcp", "udp") else "ip"
+    src_addr, src_wild = _cidr_to_huawei(rule["src_prefix"])
+    parts = [f"rule {rule_id} permit {proto_kw} source {src_addr} {src_wild}"]
+    if rule.get("dst_prefix"):
+        dst_addr, dst_wild = _cidr_to_huawei(rule["dst_prefix"])
+        parts.append(f"destination {dst_addr} {dst_wild}")
+    if rule.get("dst_port") and proto_kw in ("tcp", "udp"):
+        parts.append(f"destination-port eq {rule['dst_port']}")
+    return " ".join(parts)
+
+
+def _pbr_bypass_ssh(commands_tail: list[str], bypass_cfg: dict, flowguard_path: str) -> dict:
+    """Reaproveita edge_mitigation._run_commands (conexão/erro já tratados lá) —
+    só monta o device_cfg no formato que aquela função espera e não usa o
+    placeholder {ip} (o clause já vem pronto, com tudo embutido)."""
+    device_cfg = {"warmode_device": bypass_cfg["warmode_device"], "acl_number": bypass_cfg["acl_number"]}
+    templates = ["acl number {acl_number}", *commands_tail, "quit", "commit"]
+    return edge_mitigation._run_commands("", device_cfg, flowguard_path, templates, timeout=25.0)
+
+
+def push_pbr_bypass(rule: dict, flowspec_rule_id: int, cfg: dict, flowguard_path: str) -> dict:
+    bypass_cfg = cfg.get("pbr_bypass") or {}
+    if not bypass_cfg.get("enabled"):
+        return {"ok": True, "skipped": "pbr_bypass_disabled"}
+    rule_id = bypass_cfg["rule_id_base"] + flowspec_rule_id
+    clause = _bypass_rule_clause(rule, rule_id)
+    result = _pbr_bypass_ssh([clause], bypass_cfg, flowguard_path)
+    if not result.get("ok"):
+        LOG.error("falha ao empurrar exceção de PBR (ACL %s regra %s) pra %s: %s",
+                   bypass_cfg["acl_number"], rule_id, bypass_cfg["warmode_device"], result.get("error"))
+    return result
+
+
+def remove_pbr_bypass(flowspec_rule_id: int, cfg: dict, flowguard_path: str) -> dict:
+    bypass_cfg = cfg.get("pbr_bypass") or {}
+    if not bypass_cfg.get("enabled"):
+        return {"ok": True, "skipped": "pbr_bypass_disabled"}
+    rule_id = bypass_cfg["rule_id_base"] + flowspec_rule_id
+    result = _pbr_bypass_ssh([f"undo rule {rule_id}"], bypass_cfg, flowguard_path)
+    if not result.get("ok"):
+        LOG.error("falha ao remover exceção de PBR (ACL %s regra %s) de %s: %s",
+                   bypass_cfg["acl_number"], rule_id, bypass_cfg["warmode_device"], result.get("error"))
+    return result
+
+
 def apply_and_record(conn: sqlite3.Connection, db_lock, src_ip: str, signal_id: int | None,
                       signal_type: str, mitigation_match: dict | None, ttl_s: int | None,
                       trigger_type: str, cfg: dict, fg_socket_path: str,
-                      baseline_min_samples: int = 120) -> dict:
+                      baseline_min_samples: int = 120, flowguard_path: str = "/root/flowguard") -> dict:
     """Idempotente por src_ip, com prioridade: se já existe mitigação FlowSpec ativa
     e a nova é IGUAL OU MENOS severa, só estende o TTL; se a nova é MAIS severa
     (discard > rate_limit), retira a antiga e anuncia a nova. Uma mitigação SSH
@@ -197,7 +283,7 @@ def apply_and_record(conn: sqlite3.Connection, db_lock, src_ip: str, signal_id: 
             with lock:
                 storage.extend_edge_mitigation(conn, existing["id"], ttl_s)
             return {"ok": True, "id": existing["id"], "already_active": True}
-        revert_and_record(conn, db_lock, existing["id"], fg_socket_path)
+        revert_and_record(conn, db_lock, existing["id"], fg_socket_path, cfg, flowguard_path)
 
     with lock:
         active_count = storage.count_active_edge_mitigations(conn, "flowspec")
@@ -220,10 +306,12 @@ def apply_and_record(conn: sqlite3.Connection, db_lock, src_ip: str, signal_id: 
         )
     if not resp.get("ok"):
         return {"ok": False, "error": resp.get("error", "falha desconhecida ao anunciar FlowSpec"), "id": mitigation_id}
+    push_pbr_bypass(rule, resp["rule_id"], cfg, flowguard_path)
     return {"ok": True, "id": mitigation_id}
 
 
-def revert_and_record(conn: sqlite3.Connection, db_lock, mitigation_id: int, fg_socket_path: str) -> dict:
+def revert_and_record(conn: sqlite3.Connection, db_lock, mitigation_id: int, fg_socket_path: str,
+                       cfg: dict | None = None, flowguard_path: str = "/root/flowguard") -> dict:
     """"regra já está inativa" não é falha de verdade — é uma corrida legítima entre
     o TTL do lado do FlowGuard (expira e retira a regra sozinho, ver bgp/manager.py
     expire_cycle) e o TTL do lado do ClientGuard (mesmo ttl_s, mas checado no próximo
@@ -239,30 +327,35 @@ def revert_and_record(conn: sqlite3.Connection, db_lock, mitigation_id: int, fg_
     already_gone = not resp.get("ok") and "já está inativa" in (resp.get("error") or "")
     with lock:
         storage.mark_edge_reverted(conn, mitigation_id, error=None if (resp.get("ok") or already_gone) else resp.get("error"))
+    if cfg is not None and row.get("flowspec_rule_id") is not None:
+        remove_pbr_bypass(row["flowspec_rule_id"], cfg, flowguard_path)
     return resp if resp.get("ok") else ({"ok": True, "already_inactive": True} if already_gone else resp)
 
 
-def expire_due(conn: sqlite3.Connection, db_lock, fg_socket_path: str) -> int:
+def expire_due(conn: sqlite3.Connection, db_lock, fg_socket_path: str, cfg: dict | None = None,
+                flowguard_path: str = "/root/flowguard") -> int:
     """Chamado periodicamente pelo loop do daemon — só processa mechanism='flowspec'
     (mitigações SSH legadas expiram por conta do edge_mitigation.expire_due)."""
     lock = db_lock or nullcontext()
     with lock:
         due = storage.list_due_edge_mitigations(conn, mechanism="flowspec")
     for row in due:
-        revert_and_record(conn, db_lock, row["id"], fg_socket_path)
+        revert_and_record(conn, db_lock, row["id"], fg_socket_path, cfg, flowguard_path)
     return len(due)
 
 
 def trigger_async(conn: sqlite3.Connection, db_lock, src_ip: str, signal_id: int,
                    signal_type: str, mitigation_match: dict | None, cfg: dict,
-                   fg_socket_path: str, baseline_min_samples: int = 120) -> None:
+                   fg_socket_path: str, baseline_min_samples: int = 120,
+                   flowguard_path: str = "/root/flowguard") -> None:
     """Dispara apply_and_record em thread separada — usado pelo gatilho automático dos
     detectores, que não pode travar o ciclo de agregação esperando o round-trip do
     socket do FlowGuard."""
     def _run() -> None:
         try:
             apply_and_record(conn, db_lock, src_ip, signal_id, signal_type, mitigation_match,
-                              cfg.get("default_ttl_s"), "auto", cfg, fg_socket_path, baseline_min_samples)
+                              cfg.get("default_ttl_s"), "auto", cfg, fg_socket_path,
+                              baseline_min_samples, flowguard_path)
         except Exception:
             LOG.exception("falha ao aplicar mitigação FlowSpec automática para %s", src_ip)
 

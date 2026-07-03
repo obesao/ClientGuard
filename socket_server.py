@@ -368,6 +368,7 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
             return flowspec_mitigation.revert_and_record(
                 d.conn, d.db_lock, row["id"],
                 d.config.get("flowguard_socket", "/var/run/flowguard.sock"),
+                d.flowspec_mitigation_cfg, self._flowguard_path(),
             )
         return edge_mitigation.revert_and_record(
             d.conn, d.db_lock, row["id"], d.edge_cfg, self._flowguard_path(),

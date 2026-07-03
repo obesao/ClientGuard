@@ -49,6 +49,7 @@ def _record_signal(conn: sqlite3.Connection, src_ip: str, customer_prefix: str |
             conn, db_lock, src_ip, signal_id, signal_type, mitigation_match,
             mitigation_ctx["cfg"], mitigation_ctx["fg_socket_path"],
             mitigation_ctx.get("baseline_min_samples", 120),
+            mitigation_ctx.get("flowguard_path", "/root/flowguard"),
         )
 
     explanation = None
@@ -412,6 +413,7 @@ def run_all(conn: sqlite3.Connection, config: dict, whitelist: set, customers: l
             "cfg": mitigation_cfg,
             "fg_socket_path": config.get("flowguard_socket", "/var/run/flowguard.sock"),
             "baseline_min_samples": config.get("dns_baseline", {}).get("min_samples", 120),
+            "flowguard_path": config.get("flowguard_reuse", {}).get("path", "/root/flowguard"),
         }
     # customer_prefix -> fator: quantas identidades reais um único src_ip visível daquele
     # prefixo pode representar (ex.: pool de CGNAT). Default implícito é 1 (sem ajuste).

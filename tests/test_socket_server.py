@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import edge_mitigation
+import flowspec_mitigation
 import socket_server
 import storage
 
@@ -35,6 +36,8 @@ class FakeDaemon:
         }
         self.edge_cfg = edge_mitigation.load_config(self.config["edge_mitigation_file"])
         self.edge_cfg["warmode_device"] = "NE8000 borda"
+        self.flowspec_mitigation_cfg = flowspec_mitigation.load_config(
+            str(tmp_path / "flowspec_mitigation.yaml"))
         self.toggles = {}
         self.reload_calls = 0
 
