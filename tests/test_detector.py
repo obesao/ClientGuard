@@ -420,7 +420,7 @@ def test_run_all_disabling_ai_explanations_passes_none_as_ai_client(conn):
 
 def _mitigation_cfg():
     return {"auto_mitigate": {
-        "port_scan_horizontal": "discard", "dns_tunneling": "rate_limit",
+        "port_scan_horizontal": "discard", "port_scan_vertical": "discard", "dns_tunneling": "rate_limit",
         "amplifier_hosted": "rate_limit", "malicious_contact": "off",
     }}
 
@@ -438,7 +438,7 @@ def test_dns_tunneling_triggers_mitigation_with_udp_53_match(conn, monkeypatch):
     # (conn, db_lock, src_ip, signal_id, signal_type, mitigation_match, cfg, fg_socket_path, min_samples)
     assert args[2] == "177.86.19.93"
     assert args[4] == "dns_tunneling"
-    assert args[5] == {"protocol": "udp", "dst_port": "53"}
+    assert args[5] == {"protocol": "udp", "dst_port": "53", "dst_prefix": "203.0.113.53/32"}
 
 
 def test_amplifier_triggers_mitigation_with_src_port_match(conn, monkeypatch):
@@ -454,7 +454,7 @@ def test_amplifier_triggers_mitigation_with_src_port_match(conn, monkeypatch):
     assert args[5] == {"protocol": "udp", "src_port": "53"}
 
 
-def test_scan_horizontal_triggers_mitigation_with_no_match(conn, monkeypatch):
+def test_scan_horizontal_triggers_mitigation_with_dst_port_match(conn, monkeypatch):
     calls = []
     monkeypatch.setattr("flowspec_mitigation.trigger_async", lambda *a, **k: calls.append((a, k)))
     for i in range(5):
@@ -464,7 +464,24 @@ def test_scan_horizontal_triggers_mitigation_with_no_match(conn, monkeypatch):
     assert len(calls) == 1
     args, _ = calls[0]
     assert args[4] == "port_scan_horizontal"
-    assert args[5] is None
+    # recorte por porta escaneada + protocolo — não bloqueia/limita o cliente inteiro,
+    # só o acesso àquela porta específica (ver detector.py:detect_scan_horizontal)
+    assert args[5] == {"dst_port": "22", "protocol": "tcp"}
+
+
+def test_scan_vertical_triggers_mitigation_with_dst_prefix_match(conn, monkeypatch):
+    calls = []
+    monkeypatch.setattr("flowspec_mitigation.trigger_async", lambda *a, **k: calls.append((a, k)))
+    for port in range(5):
+        insert_flow(conn, "177.86.19.96", "45.10.0.1", 1000 + port, protocol=6)
+    detector.detect_scan_vertical(conn, WINDOW_S, threshold=5, whitelist=set(),
+                                   mitigation_ctx={"cfg": _mitigation_cfg(), "fg_socket_path": "/fake.sock"})
+    assert len(calls) == 1
+    args, _ = calls[0]
+    assert args[4] == "port_scan_vertical"
+    # recorte pelo dst_ip vítima — não bloqueia/limita o cliente pra qualquer destino,
+    # só o acesso àquela vítima específica (ver detector.py:detect_scan_vertical)
+    assert args[5] == {"dst_prefix": "45.10.0.1/32"}
 
 
 def test_off_action_does_not_call_trigger_async(conn, monkeypatch):

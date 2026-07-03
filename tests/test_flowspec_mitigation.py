@@ -64,10 +64,27 @@ def test_save_auto_mitigate_updates_ttl(tmp_path):
 
 # --- build_rule -------------------------------------------------------------
 
-def test_build_rule_discard_has_no_protocol_or_port(conn):
+def test_build_rule_discard_without_match_has_no_protocol_or_port(conn):
     cfg = _cfg()
     rule = fm.build_rule("port_scan_horizontal", "1.2.3.4", None, conn, cfg)
     assert rule == {"src_prefix": "1.2.3.4/32", "action": "discard", "label": "ClientGuard auto: port_scan_horizontal"}
+
+
+def test_build_rule_discard_applies_mitigation_match(conn):
+    """Bug real corrigido 2026-07-03: o branch 'discard' descartava mitigation_match
+    silenciosamente — port_scan_horizontal/vertical (discard, com match por dst_port/
+    dst_prefix) saíam como bloqueio do cliente inteiro em vez do recorte esperado."""
+    cfg = _cfg()
+    rule = fm.build_rule("port_scan_horizontal", "1.2.3.4", {"dst_port": "22", "protocol": "tcp"}, conn, cfg)
+    assert rule == {
+        "src_prefix": "1.2.3.4/32", "dst_port": "22", "protocol": "tcp",
+        "action": "discard", "label": "ClientGuard auto: port_scan_horizontal",
+    }
+    rule = fm.build_rule("port_scan_vertical", "1.2.3.4", {"dst_prefix": "45.10.0.1/32"}, conn, cfg)
+    assert rule == {
+        "src_prefix": "1.2.3.4/32", "dst_prefix": "45.10.0.1/32",
+        "action": "discard", "label": "ClientGuard auto: port_scan_vertical",
+    }
 
 
 def test_build_rule_off_returns_none(conn):

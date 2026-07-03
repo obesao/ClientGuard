@@ -23,7 +23,16 @@ Duas ações por tipo de sinal (auto_mitigate em flowspec_mitigation.yaml):
 
 edge_mitigation.py (SSH) não é apagado — continua rodando em paralelo só pra
 reverter mitigações SSH já ativas de antes desta migração (ver
-mechanism='ssh' vs 'flowspec' em storage.edge_mitigations)."""
+mechanism='ssh' vs 'flowspec' em storage.edge_mitigations).
+
+**Bug real corrigido 2026-07-03**: o anúncio sempre ia pro peer 'main' (padrão
+de BgpManager.flowspec_add quando peer não é passado) — desde que o ClientGuard
+passou a capturar só via NE8000-PPPOE (config.yaml capture.bpf_filter), TODO
+cliente visto por ele tem o tráfego passando por aquela caixa, não pela
+NE8000BGP. Uma regra anunciada só pro peer 'main' nunca chegava no roteador
+que de fato carrega o tráfego do cliente — a mitigação "aplicava" (ficava
+'active' no banco) mas não tinha efeito nenhum de verdade. Corrigido
+forçando peer='pppoe' neste único ponto de anúncio."""
 
 from __future__ import annotations
 
@@ -142,10 +151,15 @@ def build_rule(signal_type: str, src_ip: str, mitigation_match: dict | None,
         return None
     prefix = f"{src_ip}/32"
     label = f"ClientGuard auto: {signal_type}"
-    if action == "discard":
-        return {"src_prefix": prefix, "action": "discard", "label": label}
-    rate_bps = _compute_rate_limit_bps(signal_type, src_ip, mitigation_match, conn, cfg, baseline_min_samples)
     match = mitigation_match or {}
+    if action == "discard":
+        # bug real corrigido 2026-07-03: este branch nunca usava mitigation_match —
+        # inofensivo enquanto só rate_limit tinha match (amplifier/dns_tunneling),
+        # mas quebrava silenciosamente o recorte por dst_port/dst_prefix assim que
+        # port_scan_* passou a usar discard (regra saía sem NENHUM campo de match
+        # além do src_prefix, voltando a bloquear o cliente inteiro).
+        return {"src_prefix": prefix, **match, "action": "discard", "label": label}
+    rate_bps = _compute_rate_limit_bps(signal_type, src_ip, mitigation_match, conn, cfg, baseline_min_samples)
     return {"src_prefix": prefix, **match, "action": f"rate-limit:{rate_bps}", "label": label}
 
 
@@ -193,7 +207,7 @@ def apply_and_record(conn: sqlite3.Connection, db_lock, src_ip: str, signal_id: 
         return {"ok": False, "error": "orçamento de regras FlowSpec atingido"}
 
     resp = control.send_command(fg_socket_path, {
-        "cmd": "flowspec_add", "rule": rule, "ttl_s": ttl_s, "origin": "clientguard",
+        "cmd": "flowspec_add", "rule": rule, "ttl_s": ttl_s, "origin": "clientguard", "peer": "pppoe",
     })
     rate_limit_bps = int(rule["action"].split(":", 1)[1]) if rule["action"].startswith("rate-limit:") else None
     with lock:

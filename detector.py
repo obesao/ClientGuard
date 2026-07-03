@@ -114,18 +114,24 @@ def detect_scan_horizontal(conn: sqlite3.Connection, window_s: int, threshold: i
 
     max_avg_bytes filtra tráfego P2P/torrent (muitos hosts distintos, mas com volume real
     de dados por destino) — scan de reconhecimento de verdade manda pacotes pequenos de
-    sonda, não centenas de KB por alvo. None desativa o filtro (compara qualquer volume)."""
+    sonda, não centenas de KB por alvo. None desativa o filtro (compara qualquer volume).
+
+    mitigation_match agora recorta a regra FlowSpec pela porta escaneada (+ protocolo,
+    quando homogêneo) em vez de bloquear/limitar o cliente inteiro — ver
+    flowspec_mitigation.build_rule. Sem isso, "discard" derrubava toda a conexão do
+    cliente (falso positivo caro) e "rate_limit" mal freava o scan (sonda é pacote
+    pequeno, não volume de banda) — as únicas duas opções ruins que existiam antes."""
     multipliers = multipliers or {}
     lock = db_lock or nullcontext()
     since = int(time.time()) - window_s
-    query = """SELECT src_ip, customer_prefix, dst_port, COUNT(DISTINCT dst_ip) AS n_hosts,
+    query = """SELECT src_ip, customer_prefix, dst_port, protocol, COUNT(DISTINCT dst_ip) AS n_hosts,
                       SUM(bytes) AS total_bytes
                FROM client_flow_aggs WHERE ts >= ?"""
     params: list = [since]
     if exclude_ports:
         query += f" AND dst_port NOT IN ({','.join('?' * len(exclude_ports))})"
         params.extend(exclude_ports)
-    query += " GROUP BY src_ip, dst_port HAVING n_hosts >= ?"
+    query += " GROUP BY src_ip, dst_port, protocol HAVING n_hosts >= ?"
     params.append(threshold)
     with lock:
         rows = conn.execute(query, params).fetchall()
@@ -138,11 +144,15 @@ def detect_scan_horizontal(conn: sqlite3.Connection, window_s: int, threshold: i
         avg_bytes = r["total_bytes"] / r["n_hosts"]
         if max_avg_bytes is not None and avg_bytes > max_avg_bytes:
             continue
+        mitigation_match = {"dst_port": str(r["dst_port"])}
+        proto_name = {6: "tcp", 17: "udp"}.get(r["protocol"])
+        if proto_name:
+            mitigation_match["protocol"] = proto_name
         _record_signal(conn, r["src_ip"], r["customer_prefix"], "port_scan_horizontal",
                         min(1.0, r["n_hosts"] / (effective * 2)),
                         {"dst_port": r["dst_port"], "n_hosts": r["n_hosts"], "avg_bytes": round(avg_bytes),
                          "window_s": window_s},
-                        webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx)
+                        webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx, mitigation_match)
 
 
 def detect_scan_vertical(conn: sqlite3.Connection, window_s: int, threshold: int, whitelist: set,
@@ -152,7 +162,13 @@ def detect_scan_vertical(conn: sqlite3.Connection, window_s: int, threshold: int
 
     multipliers escala o limiar pra prefixos CGNAT — ver docstring de detect_scan_horizontal.
     max_avg_bytes filtra P2P/torrent (muitas portas, mas volume real por porta) — mesmo
-    raciocínio de detect_scan_horizontal."""
+    raciocínio de detect_scan_horizontal.
+
+    mitigation_match recorta a regra FlowSpec pro dst_ip vítima (dst_prefix=vítima/32),
+    protocolo-agnóstico (queremos blindar a vítima de QUALQUER porta/protocolo que o
+    scanner tente, não só a combinação já vista) — em vez de bloquear/limitar todo o
+    tráfego do cliente pra qualquer destino. Efeito: o cliente continua acessando o
+    resto da internet normalmente, só não alcança mais aquela vítima específica."""
     multipliers = multipliers or {}
     lock = db_lock or nullcontext()
     since = int(time.time()) - window_s
@@ -173,11 +189,12 @@ def detect_scan_vertical(conn: sqlite3.Connection, window_s: int, threshold: int
         avg_bytes = r["total_bytes"] / r["n_ports"]
         if max_avg_bytes is not None and avg_bytes > max_avg_bytes:
             continue
+        mitigation_match = {"dst_prefix": f"{r['dst_ip']}/32"}
         _record_signal(conn, r["src_ip"], r["customer_prefix"], "port_scan_vertical",
                         min(1.0, r["n_ports"] / (effective * 2)),
                         {"dst_ip": r["dst_ip"], "n_ports": r["n_ports"], "avg_bytes": round(avg_bytes),
                          "window_s": window_s},
-                        webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx)
+                        webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx, mitigation_match)
 
 
 def detect_amplifier(conn: sqlite3.Connection, window_s: int, ports: list[int], min_bps: float,
@@ -335,7 +352,12 @@ def detect_dns_tunneling(conn: sqlite3.Connection, window_s: int, min_queries: i
     multipliers escala o limiar pra prefixos CGNAT — ver docstring de detect_scan_horizontal.
     Volume de DNS combinado de várias pessoas atrás do mesmo IP visível pode passar do
     limiar pensado pra 1 cliente sem que ninguém esteja de fato tunelando (distinguível de
-    túnel real pelo avg_pkt_bytes: normal fica pequeno, tunelamento estufa o pacote)."""
+    túnel real pelo avg_pkt_bytes: normal fica pequeno, tunelamento estufa o pacote).
+
+    mitigation_match já recortava por protocol=udp/dst_port=53 (não limitava banda
+    geral do cliente), mas faltava o dst_ip: sem isso o rate-limit valia pra QUALQUER
+    resolver, inclusive os legítimos que o cliente também usa. Adicionado dst_prefix
+    do resolver suspeito — agora só a consulta àquele destino específico é limitada."""
     multipliers = multipliers or {}
     lock = db_lock or nullcontext()
     since = int(time.time()) - window_s
@@ -358,7 +380,7 @@ def detect_dns_tunneling(conn: sqlite3.Connection, window_s: int, min_queries: i
                         {"dst_ip": r["dst_ip"], "n_queries": r["n_queries"], "avg_pkt_bytes": avg_pkt_bytes,
                          "window_s": window_s},
                         webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx,
-                        {"protocol": "udp", "dst_port": "53"})
+                        {"protocol": "udp", "dst_port": "53", "dst_prefix": f"{r['dst_ip']}/32"})
 
 
 def run_all(conn: sqlite3.Connection, config: dict, whitelist: set, customers: list[dict] = (),

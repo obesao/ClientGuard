@@ -10,6 +10,13 @@ dns_rate_limit_floor_bps: 200000
 spam_rate_limit_bps: 500000
 rate_limit_sigma: 3
 auto_mitigate:
+  # 2026-07-03: rate_limit -> discard. Antes disso a regra recortava só o
+  # cliente inteiro (src_prefix/32), então "discard" nocauteava toda a conexão
+  # dele — rate_limit era o meio-termo possível, mas banda não freia scan de
+  # pacote pequeno. Agora a regra recorta pela porta escaneada (horizontal) ou
+  # pelo dst_ip vítima (vertical) — ver detector.py — então discard é seguro:
+  # só aquela porta/vítima específica é bloqueada, o resto do tráfego do
+  # cliente continua livre.
   port_scan_horizontal: discard
   port_scan_vertical: discard
   spam_bot: rate_limit
