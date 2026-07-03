@@ -307,7 +307,10 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         except ValueError:
             return {"ok": False, "error": f"IP/CIDR inválido: {ip}"}
         rule = {"src_prefix": prefix, "action": "discard", "label": "bloqueio manual via ClientGuard"}
-        payload = {"cmd": "flowspec_add", "rule": rule}
+        # origin permite a aba Regras unificada do portal separar por aplicação —
+        # embora a regra "de verdade" viva no FlowGuard (única sessão BGP), ela foi
+        # pedida pelo ClientGuard.
+        payload = {"cmd": "flowspec_add", "rule": rule, "origin": "clientguard"}
         ttl_s = request.get("ttl_s")
         if ttl_s:
             payload["ttl_s"] = int(ttl_s)

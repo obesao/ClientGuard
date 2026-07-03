@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.13.0**
+**Versão atual: v1.14.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,14 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.14.0 — 2026-07-02 — `block_add` marca `origin: clientguard` pro FlowGuard
+Base pra aba "Regras" unificada do portal (histórico de toda interação com a
+borda, separado por aplicação — ver CHANGELOG do `flowguard`): `_cmd_block_add`
+agora manda `"origin": "clientguard"` junto do `flowspec_add` que pede pro
+FlowGuard, além do `label` de texto livre que já existia. A regra "de verdade"
+continua vivendo só no FlowGuard (única sessão BGP) — isto só marca quem pediu.
+131 testes pytest (novo: assert de `origin` no payload de `block_add`).
 
 ### v1.13.0 — 2026-07-02 — Desempenho: fim dos timeouts constantes do portal
 Usuário reportou "FlowGuard: timeout ao falar com o daemon" constante no portal.

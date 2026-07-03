@@ -83,6 +83,7 @@ def test_block_add_sends_flowspec_discard_rule(server):
     assert payload["cmd"] == "flowspec_add"
     assert payload["rule"]["src_prefix"] == "1.2.3.4/32"
     assert payload["rule"]["action"] == "discard"
+    assert payload["origin"] == "clientguard"  # aba Regras unificada do portal separa por aplicação
 
 
 def test_block_add_missing_ip(server):
