@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.17.0**
+**Versão atual: v1.17.1**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,15 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.17.1 — 2026-07-03 — Escuta só a caixa PPPOE, desliga a caixa BGP
+- Pedido do usuário: parar de escutar as 2 caixas (NE8000BGP na porta 2055,
+  mesmo feed do FlowGuard, + NE8000-PPPOE na 2060) — agora só a PPPOE.
+  `bpf_filter` de `"udp port 2055 or udp port 2060"` para `"udp port 2060"`.
+- Confirmado em produção: volume por ciclo caiu de ~110-125k pra ~20-30k
+  flows, e "sem cliente identificado" caiu de ~16k pra ~1 por ciclo — a
+  maior parte do tráfego não-identificável vinha da caixa BGP (tráfego
+  geral de internet dos prefixos monitorados, não sessão de cliente PPPoE).
 
 ### v1.17.0 — 2026-07-03 — Captura passa do A10 (CGNAT) pro NE8000-PPPOE
 - Pedido do usuário: escutar mais um equipamento de NetFlow (o A10 que faz
