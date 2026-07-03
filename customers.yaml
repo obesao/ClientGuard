@@ -31,5 +31,4 @@
   prefix: 177.86.23.0/24
 - network: 100.64.0.0/10
   prefix: 100.64.0.0/10
-  name: CGNAT-A10
-  client_multiplier: 32
+  name: CGNAT-PPPOE
