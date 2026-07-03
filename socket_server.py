@@ -356,13 +356,24 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
             d.edge_cfg, self._flowguard_path(),
         )
 
-    def _cmd_edge_revert(self, request: dict) -> dict:
+    def _revert_edge_mitigation_row(self, row: dict) -> dict:
         # Despacha pelo mechanism da própria linha — mitigação flowspec precisa de
         # flowspec_del no socket do FlowGuard, não do caminho SSH/ACL legado (achado
         # real: reverter uma linha flowspec por aqui sem essa checagem fazia SSH no
         # roteador tentar desfazer uma regra de ACL que nunca existiu — "sucesso" ou
         # "Channel closed" no SSH, mas a regra FlowSpec de verdade nunca era retirada,
         # ficando ativa até o próprio TTL dela vencer, invisível pro ClientGuard).
+        d = self.daemon_ref
+        if row["mechanism"] == "flowspec":
+            return flowspec_mitigation.revert_and_record(
+                d.conn, d.db_lock, row["id"],
+                d.config.get("flowguard_socket", "/var/run/flowguard.sock"),
+            )
+        return edge_mitigation.revert_and_record(
+            d.conn, d.db_lock, row["id"], d.edge_cfg, self._flowguard_path(),
+        )
+
+    def _cmd_edge_revert(self, request: dict) -> dict:
         mitigation_id = request.get("id")
         if not mitigation_id:
             return {"ok": False, "error": "id obrigatório"}
@@ -371,14 +382,21 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
             row = storage.get_edge_mitigation(d.conn, int(mitigation_id))
         if not row:
             return {"ok": False, "error": "mitigação não encontrada"}
-        if row["mechanism"] == "flowspec":
-            return flowspec_mitigation.revert_and_record(
-                d.conn, d.db_lock, int(mitigation_id),
-                d.config.get("flowguard_socket", "/var/run/flowguard.sock"),
-            )
-        return edge_mitigation.revert_and_record(
-            d.conn, d.db_lock, int(mitigation_id), d.edge_cfg, self._flowguard_path(),
-        )
+        return self._revert_edge_mitigation_row(row)
+
+    def _cmd_edge_revert_all(self, request: dict) -> dict:
+        d = self.daemon_ref
+        with d.db_lock:
+            rows = storage.list_edge_mitigations(d.conn, active_only=True)
+        reverted, failed = 0, 0
+        for row in rows:
+            resp = self._revert_edge_mitigation_row(row)
+            if resp.get("ok"):
+                reverted += 1
+            else:
+                failed += 1
+                LOG.error("falha ao reverter mitigação id=%s: %s", row["id"], resp.get("error"))
+        return {"ok": failed == 0, "reverted": reverted, "failed": failed}
 
     def _cmd_edge_list(self, request: dict) -> dict:
         with self._read_conn() as rconn:

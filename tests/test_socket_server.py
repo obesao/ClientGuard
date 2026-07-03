@@ -182,6 +182,43 @@ def test_edge_revert_unknown_id(server):
     assert resp["ok"] is False
 
 
+def test_edge_revert_all_reverts_mixed_mechanisms(server, conn):
+    ssh_id = storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "manual")
+    flowspec_id = storage.insert_edge_mitigation(
+        conn, "5.6.7.8", None, 3600, "manual", mechanism="flowspec", flowspec_rule_id=7,
+    )
+    inactive_id = storage.insert_edge_mitigation(conn, "9.9.9.9", None, 3600, "manual")
+    storage.mark_edge_reverted(conn, inactive_id)
+
+    fake_conn = MagicMock()
+    fake_conn.send_config_set.return_value = "ok"
+    with patch("netmiko.ConnectHandler", return_value=fake_conn), \
+         patch("control.send_command", return_value={"ok": True}) as mock_send:
+        resp = server.dispatch({"cmd": "edge_revert_all"})
+
+    assert resp == {"ok": True, "reverted": 2, "failed": 0}
+    assert storage.get_edge_mitigation(conn, ssh_id)["status"] == "reverted"
+    assert storage.get_edge_mitigation(conn, flowspec_id)["status"] == "reverted"
+    _, payload = mock_send.call_args[0]
+    assert payload == {"cmd": "flowspec_del", "rule_id": 7}
+    # a já inativa não é tocada de novo (list_edge_mitigations active_only exclui ela)
+    assert storage.get_edge_mitigation(conn, inactive_id)["ts_reverted"] is not None
+
+
+def test_edge_revert_all_counts_failures(server, conn):
+    storage.insert_edge_mitigation(
+        conn, "5.6.7.8", None, 3600, "manual", mechanism="flowspec", flowspec_rule_id=7,
+    )
+    with patch("control.send_command", return_value={"ok": False, "error": "timeout"}):
+        resp = server.dispatch({"cmd": "edge_revert_all"})
+    assert resp == {"ok": False, "reverted": 0, "failed": 1}
+
+
+def test_edge_revert_all_no_active_mitigations(server):
+    resp = server.dispatch({"cmd": "edge_revert_all"})
+    assert resp == {"ok": True, "reverted": 0, "failed": 0}
+
+
 def test_edge_list_returns_all_by_default(server, conn):
     storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "manual")
     storage.mark_edge_reverted(conn, storage.insert_edge_mitigation(conn, "5.6.7.8", None, 3600, "manual"))

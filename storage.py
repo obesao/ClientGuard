@@ -333,9 +333,10 @@ def daemon_stats(conn: sqlite3.Connection, window_s: int) -> dict:
         "SELECT COUNT(DISTINCT src_ip) FROM client_flow_aggs WHERE ts >= ?", (since,),
     ).fetchone()[0]
     open_signals = conn.execute("SELECT COUNT(*) FROM suspicious_clients WHERE resolved = 0").fetchone()[0]
+    active_mitigations = conn.execute("SELECT COUNT(*) FROM edge_mitigations WHERE status = 'active'").fetchone()[0]
     return {
         "flows_window": flows_window, "distinct_src_ips": distinct_src_ips,
-        "open_signals": open_signals,
+        "open_signals": open_signals, "active_mitigations": active_mitigations,
     }
 
 

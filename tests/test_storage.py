@@ -19,6 +19,14 @@ def test_insert_and_get_open_signal(conn):
     assert found["resolved"] == 0
 
 
+def test_daemon_stats_counts_only_active_mitigations(conn):
+    storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "manual")
+    reverted_id = storage.insert_edge_mitigation(conn, "5.6.7.8", None, 3600, "manual")
+    storage.mark_edge_reverted(conn, reverted_id)
+    stats = storage.daemon_stats(conn, 30)
+    assert stats["active_mitigations"] == 1
+
+
 def test_get_open_signal_ignores_resolved(conn):
     signal_id = storage.insert_suspicious_client(conn, {
         "src_ip": "177.86.19.2", "customer_prefix": None,
