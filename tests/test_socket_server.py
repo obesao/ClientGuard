@@ -158,6 +158,30 @@ def test_edge_revert_missing_id(server):
     assert resp["ok"] is False
 
 
+def test_edge_revert_dispatches_flowspec_mechanism_to_flowspec_del(server, conn):
+    # achado real: revert de uma linha mechanism='flowspec' caía sempre no caminho
+    # SSH/ACL legado (edge_mitigation.revert_and_record) — a regra FlowSpec de
+    # verdade nunca era retirada do FlowGuard, só ficava "reverted"/"failed" no
+    # lado do ClientGuard enquanto continuava ativa no roteador até o próprio TTL
+    # vencer. Preciso confirmar que o despacho vai pro módulo certo, sem tocar SSH.
+    mitigation_id = storage.insert_edge_mitigation(
+        conn, "1.2.3.4", None, 3600, "manual", mechanism="flowspec", flowspec_rule_id=42,
+    )
+    with patch("control.send_command", return_value={"ok": True}) as mock_send, \
+         patch("netmiko.ConnectHandler") as mock_ssh:
+        resp = server.dispatch({"cmd": "edge_revert", "id": mitigation_id})
+    assert resp["ok"] is True
+    _, payload = mock_send.call_args[0]
+    assert payload == {"cmd": "flowspec_del", "rule_id": 42}
+    assert not mock_ssh.called
+    assert storage.get_edge_mitigation(conn, mitigation_id)["status"] == "reverted"
+
+
+def test_edge_revert_unknown_id(server):
+    resp = server.dispatch({"cmd": "edge_revert", "id": 999})
+    assert resp["ok"] is False
+
+
 def test_edge_list_returns_all_by_default(server, conn):
     storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "manual")
     storage.mark_edge_reverted(conn, storage.insert_edge_mitigation(conn, "5.6.7.8", None, 3600, "manual"))

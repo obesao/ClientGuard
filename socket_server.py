@@ -357,10 +357,25 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         )
 
     def _cmd_edge_revert(self, request: dict) -> dict:
+        # Despacha pelo mechanism da própria linha — mitigação flowspec precisa de
+        # flowspec_del no socket do FlowGuard, não do caminho SSH/ACL legado (achado
+        # real: reverter uma linha flowspec por aqui sem essa checagem fazia SSH no
+        # roteador tentar desfazer uma regra de ACL que nunca existiu — "sucesso" ou
+        # "Channel closed" no SSH, mas a regra FlowSpec de verdade nunca era retirada,
+        # ficando ativa até o próprio TTL dela vencer, invisível pro ClientGuard).
         mitigation_id = request.get("id")
         if not mitigation_id:
             return {"ok": False, "error": "id obrigatório"}
         d = self.daemon_ref
+        with d.db_lock:
+            row = storage.get_edge_mitigation(d.conn, int(mitigation_id))
+        if not row:
+            return {"ok": False, "error": "mitigação não encontrada"}
+        if row["mechanism"] == "flowspec":
+            return flowspec_mitigation.revert_and_record(
+                d.conn, d.db_lock, int(mitigation_id),
+                d.config.get("flowguard_socket", "/var/run/flowguard.sock"),
+            )
         return edge_mitigation.revert_and_record(
             d.conn, d.db_lock, int(mitigation_id), d.edge_cfg, self._flowguard_path(),
         )
