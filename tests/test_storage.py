@@ -115,6 +115,52 @@ def test_prune_old_aggs_removes_only_expired_rows(conn):
     assert [r["src_ip"] for r in remaining] == ["177.86.19.9"]
 
 
+def test_bucket_client_port_keeps_configured_ports(conn):
+    assert storage.bucket_client_port(53, {53, 123, 1900, 11211, 389}) == 53
+    assert storage.bucket_client_port(11211, {53, 123, 1900, 11211, 389}) == 11211
+
+
+def test_bucket_client_port_collapses_everything_else(conn):
+    assert storage.bucket_client_port(54321, {53, 123, 1900, 11211, 389}) == 0
+    assert storage.bucket_client_port(80, {53, 123, 1900, 11211, 389}) == 0
+
+
+def test_compact_client_flow_aggs_merges_duplicate_ephemeral_ports(conn):
+    ts = int(time.time())
+    # mesmo (ts,src_ip,dst_ip,dst_port,protocol), 3 portas efêmeras distintas do cliente
+    for src_port in (40001, 40002, 40003):
+        insert_flow(conn, "177.86.19.20", "1.2.3.4", 443, protocol=6,
+                    bytes_=100, packets_=1, src_port=src_port, ts=ts)
+    # porta de amplificação real (53) deve permanecer distinta, não some no merge
+    insert_flow(conn, "177.86.19.20", "8.8.8.8", 12345, protocol=17,
+                bytes_=200, packets_=2, src_port=53, ts=ts)
+
+    before, after = storage.compact_client_flow_aggs(conn, {53, 123, 1900, 11211, 389})
+    assert before == 4
+    assert after == 2  # as 3 linhas de porta efêmera viram 1; a de amplificação continua separada
+
+    rows = conn.execute("SELECT * FROM client_flow_aggs ORDER BY dst_port").fetchall()
+    merged = next(r for r in rows if r["dst_port"] == 443)
+    assert merged["src_port"] == 0
+    assert merged["bytes"] == 300  # soma preservada (100 * 3)
+    assert merged["packets"] == 3
+
+    amp = next(r for r in rows if r["dst_port"] == 12345)
+    assert amp["src_port"] == 53  # porta de amplificação preservada, não bucketizada
+    assert amp["bytes"] == 200
+
+
+def test_compact_client_flow_aggs_preserves_total_bytes(conn):
+    ts = int(time.time())
+    for i in range(10):
+        insert_flow(conn, "177.86.19.21", "1.2.3.4", 443, protocol=6,
+                    bytes_=50, packets_=1, src_port=30000 + i, ts=ts)
+    total_before = conn.execute("SELECT SUM(bytes) FROM client_flow_aggs").fetchone()[0]
+    storage.compact_client_flow_aggs(conn, set())
+    total_after = conn.execute("SELECT SUM(bytes) FROM client_flow_aggs").fetchone()[0]
+    assert total_before == total_after == 500
+
+
 def test_geoip_cache_roundtrip(conn):
     storage.save_geoip_batch(conn, [("8.8.8.8", 15169, "US"), ("1.1.1.1", 13335, "AU")])
     cached = storage.load_geoip_cache(conn)

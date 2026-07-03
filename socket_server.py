@@ -10,8 +10,10 @@ import json
 import logging
 import os
 import socketserver
+import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import configio
@@ -20,6 +22,26 @@ import edge_mitigation
 import storage
 
 LOG = logging.getLogger("clientguard.socket")
+
+
+@contextmanager
+def _read_only_conn(db_path: str):
+    """Conexão SQLite dedicada e somente-leitura, fora do db_lock do daemon — o
+    SQLite em modo WAL permite leitores concorrentes sem bloquear nem ser bloqueado
+    pelo escritor (ciclo de agregação/detecção no MainThread, que segura d.db_lock
+    por vários segundos sob tabela grande). Achado real em produção: todo comando de
+    leitura do socket (status, top, sinais suspeitos, mitigações de borda...)
+    compartilhava a MESMA conexão + o MESMO lock global usado pela escrita — uma
+    query de detecção lenta travava até consultas triviais por 10-20s, gerando
+    "timeout ao falar com o daemon" constante no portal (confirmado com py-spy: não
+    era deadlock, era fila atrás do mesmo lock). Escrita continua sempre via
+    d.conn/d.db_lock, sem mudança — só leitura passou a usar isto."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 # Protege o read-modify-write de toggles.yaml — o socket atende conexões em threads
 # de verdade (ThreadingUnixStreamServer, não asyncio), então duas chamadas concorrentes
@@ -99,6 +121,9 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         except FileNotFoundError:
             pass
 
+    def _read_conn(self):
+        return _read_only_conn(self.daemon_ref.config["database"]["path"])
+
     def dispatch(self, request: dict) -> dict:
         cmd = request.get("cmd", "")
         handler = getattr(self, f"_cmd_{cmd}", None)
@@ -115,12 +140,13 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
     def _cmd_status(self, request: dict) -> dict:
         d = self.daemon_ref
         interval = d.config["database"]["aggregate_interval_s"]
-        with d.db_lock:
-            stats = storage.daemon_stats(d.conn, interval)
+        with self._read_conn() as rconn:
+            stats = storage.daemon_stats(rconn, interval)
         return {
             "ok": True, "pid": os.getpid(), "uptime_s": time.time() - d.started_at,
             "iface": d.config["capture"]["iface"], "bpf_filter": d.config["capture"]["bpf_filter"],
             "n_customers": len(d.customers), "n_whitelist": len(d.whitelist),
+            "total_rows": d.total_rows,
             **stats,
         }
 
@@ -128,8 +154,8 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         d = self.daemon_ref
         limit = int(request.get("limit", 20))
         window_s = int(request.get("window_s") or d.config["database"]["aggregate_interval_s"])
-        with d.db_lock:
-            top = storage.top_src_ips(d.conn, window_s, limit)
+        with self._read_conn() as rconn:
+            top = storage.top_src_ips(rconn, window_s, limit)
         return {"ok": True, "top": top}
 
     def _cmd_client_detail(self, request: dict) -> dict:
@@ -139,17 +165,16 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         d = self.daemon_ref
         window_s = int(request.get("window_s") or d.config["database"]["aggregate_interval_s"])
         bucket_s = _bucket_for_window(window_s)
-        with d.db_lock:
-            timeseries = storage.client_usage_timeseries(d.conn, src_ip, window_s, bucket_s)
-            top_destinations = storage.client_top_destinations(d.conn, src_ip, window_s, limit=10)
+        with self._read_conn() as rconn:
+            timeseries = storage.client_usage_timeseries(rconn, src_ip, window_s, bucket_s)
+            top_destinations = storage.client_top_destinations(rconn, src_ip, window_s, limit=10)
         return {"ok": True, "timeseries": timeseries, "top_destinations": top_destinations}
 
     def _cmd_suspicious(self, request: dict) -> dict:
-        d = self.daemon_ref
         resolved = bool(request.get("history", False))
         since_s = int(request.get("since_s", 86400))
-        with d.db_lock:
-            items = storage.list_suspicious_clients(d.conn, resolved=resolved, since_s=since_s)
+        with self._read_conn() as rconn:
+            items = storage.list_suspicious_clients(rconn, resolved=resolved, since_s=since_s)
         return {"ok": True, "suspicious": items}
 
     def _cmd_resolve(self, request: dict) -> dict:
@@ -335,9 +360,8 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         )
 
     def _cmd_edge_list(self, request: dict) -> dict:
-        d = self.daemon_ref
-        with d.db_lock:
-            items = storage.list_edge_mitigations(d.conn, active_only=bool(request.get("active_only", False)))
+        with self._read_conn() as rconn:
+            items = storage.list_edge_mitigations(rconn, active_only=bool(request.get("active_only", False)))
         return {"ok": True, "mitigations": items}
 
     def _cmd_edge_config(self, request: dict) -> dict:

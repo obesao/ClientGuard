@@ -41,6 +41,9 @@ class ClientGuardDaemon:
         self.queue: queue.Queue = queue.Queue(maxsize=200_000)
         self.conn = storage.connect(self.config["database"]["path"], check_same_thread=False)
         self.db_lock = threading.Lock()
+        # contagem incremental (não reconta via COUNT(*) a cada "status" — ver
+        # storage.daemon_stats) — só a carga inicial faz uma varredura completa.
+        self.total_rows = self.conn.execute("SELECT COUNT(*) FROM client_flow_aggs").fetchone()[0]
         self.customers = configio.load_yaml_list(self.config["customer_registry"])
         self.whitelist = WhitelistMatcher(configio.load_yaml_list(self.config["whitelist_file"]))
         self.toggles = configio.load_feature_toggles(self.config.get("feature_toggles_file", ""))
@@ -113,6 +116,11 @@ class ClientGuardDaemon:
 
         groups: dict[tuple, dict] = {}
         skipped = 0
+        # portas de origem do CLIENTE fora desta lista colapsam pra 0 na chave de
+        # agregação (ver storage.bucket_client_port) — nenhum detector além do
+        # amplifier olha src_port, e sem isso cada conexão distinta do cliente vira
+        # uma porta efêmera única, inflando client_flow_aggs sem ganho de detecção.
+        amplifier_ports = set(self.config["detection"]["amplifier_ports"])
         for rec in records:
             classified = classify_client_side(rec.src_ip, rec.dst_ip, self.customers)
             if classified is None:
@@ -123,6 +131,7 @@ class ClientGuardDaemon:
                 client_port, other_port = rec.src_port, rec.dst_port
             else:
                 client_port, other_port = rec.dst_port, rec.src_port
+            client_port = storage.bucket_client_port(client_port, amplifier_ports)
             key = (client_ip, client_port, other_ip, other_port, rec.protocol)
             g = groups.setdefault(key, {"bytes": 0, "packets": 0, "customer_prefix": customer_prefix})
             g["bytes"] += rec.real_bytes
@@ -150,6 +159,7 @@ class ClientGuardDaemon:
             with self.db_lock:
                 if rows:
                     storage.insert_client_flow_aggs_batch(self.conn, rows)
+                    self.total_rows += len(rows)
                 LOG.info(
                     "agregação: %d flows -> %d grupos (src_ip,src_port,dst_ip,dst_port,protocolo)%s",
                     len(records), len(groups),
@@ -170,6 +180,7 @@ class ClientGuardDaemon:
         if self._cycle_count % cycles_per_hour == 0:
             with self.db_lock:
                 pruned = storage.prune_old_aggs(self.conn, self.config["database"]["retention_days"])
+                self.total_rows -= pruned
             if pruned:
                 LOG.info("retenção: %d agregados antigos removidos", pruned)
 

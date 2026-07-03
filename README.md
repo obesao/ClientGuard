@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.12.0**
+**Versão atual: v1.13.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -70,6 +70,7 @@ comprometidos (scan, spam, amplificação, C2, exfiltração).
 | `geoip.py` | Enriquecimento ASN/país via Team Cymru |
 | `edge_mitigation.py` | Mitigação direta na borda via SSH (ACL) — dirigida por sinal, gatilho automático opcional |
 | `tools/synth_client_flows.py` | Gerador de NetFlow sintético para testar os detectores |
+| `tools/compact_client_flow_aggs.py` | Compactação offline de `client_flow_aggs` (rodar 1x, daemon parado) |
 | `tests/` | Suíte pytest (126 testes) — detectores, storage, configio, threat feed, geoip, socket, mitigação de borda |
 
 ## Testes
@@ -96,6 +97,70 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.13.0 — 2026-07-02 — Desempenho: fim dos timeouts constantes do portal
+Usuário reportou "FlowGuard: timeout ao falar com o daemon" constante no portal.
+Investigação achou DUAS causas reais, distintas e independentes:
+
+1. **Contenção de lock (causa dominante)** — confirmado com `py-spy dump` no
+   processo real: todo comando de LEITURA do socket (`status`, `top`,
+   `suspicious`, `client_detail`, `edge_list`) compartilhava a MESMA conexão
+   SQLite e o MESMO `db_lock` usado pela escrita (agregação + os 7
+   detectores rodando a cada ciclo) — não era deadlock, era fila: uma query
+   de detecção genuinamente lenta segurava o lock por vários segundos e
+   travava até um `status` trivial atrás dela. Fix: `socket_server.py` ganhou
+   `_read_only_conn()`/`_read_conn()` — os comandos de leitura agora abrem
+   uma conexão SQLite dedicada e somente-leitura (`file:...?mode=ro`), fora
+   do `db_lock` — SQLite em modo WAL permite leitores concorrentes sem
+   bloquear nem ser bloqueado pelo escritor. Escrita continua 100% via
+   `d.conn`/`d.db_lock`, sem mudança nenhuma aí. Resultado medido: `status`
+   caiu de ~2-18s (variável, sob contenção) pra ~0.2s consistente;
+   `suspicious`/`edge_list`/`toggles` ficaram sub-10ms mesmo com outras
+   queries pesadas rodando ao mesmo tempo.
+2. **`total_rows` recalculado do zero a cada `status`** — era um
+   `COUNT(*)` sem `WHERE` sobre `client_flow_aggs` (~2s sob ~26M linhas),
+   chamado a cada poll de 5s do portal. Fix: `ClientGuardDaemon.total_rows`
+   agora é um contador incremental em memória (soma no insert, subtrai no
+   prune), só faz UMA varredura completa no startup do daemon.
+
+Também investigado e corrigido, embora com impacto menor do que o esperado:
+`client_flow_aggs` já tinha ~30.6M linhas — a chave de agregação incluía a
+porta de origem EFÊMERA do cliente (nenhum detector além de `amplifier_hosted`
+olha essa porta), inflando a tabela sem ganho de detecção, mesma classe do bug
+já corrigido no `flow_aggs` do FlowGuard. `clientguard.py`/`storage.py`
+ganharam `bucket_client_port()` — colapsa a porta de origem pra 0 exceto
+quando é uma das portas de amplificação configuradas (as únicas que um
+detector precisa distinguir com exatidão). **Diferente do FlowGuard, aqui o
+ganho foi modesto (~15-25%, não ~99%)** — a maior parte da cardinalidade do
+ClientGuard é tráfego genuinamente distinto (centenas de clientes ativos, cada
+um contatando dezenas/centenas de destinos reais por ciclo), não duplicação
+artificial. Rodado uma vez em produção via `tools/compact_client_flow_aggs.py`
+(novo, roda OFFLINE com o daemon parado): 30.627.912 → 26.137.846 linhas
+(-14.7%, soma de bytes preservada — invariante checado no próprio script,
+aborta se não bater). VACUUM reduziu o arquivo de 4.7G pra ~3.9G. **Achado
+real na primeira rodada**: sem `ANALYZE` depois da reescrita da tabela, o
+query planner escolheu um SCAN completo do índice `(src_ip, ts)` pra
+`COUNT(DISTINCT src_ip)` mesmo filtrando só os últimos 30s (~2s) — rodar
+`ANALYZE client_flow_aggs` (agora dentro de `compact_client_flow_aggs`, não
+só no `prune_old_aggs` periódico) resolveu sem precisar de índice novo.
+
+Timeout dos endpoints mais pesados do portal (`clientguard-top.sh`,
+`clientguard-client-detail.sh` — fazem `GROUP BY`+`ORDER BY` sobre a tabela
+inteira pra janelas longas como 7 dias) subiu de 5s pra 20s — mesmo com a
+contenção de lock resolvida, essa consulta específica ainda leva ~10-16s sob
+o volume atual de dados (confirmado com Playwright real: painel "Top
+Clientes" com janela de 7d renderizou em ~9s, sem erro). Não é um problema
+resolvido de vez — se o volume de clientes/tráfego crescer bastante mais,
+provavelmente vale a pena um rollup pré-agregado (hora/dia) só pro portal,
+separado da tabela de granularidade fina que a detecção usa.
+
+Backup do banco antes da compactação preservado em
+`db/client_flow.sqlite.bak-preCompact` (4.7G) — não removido automaticamente,
+apagar manualmente quando confirmar que está tudo estável.
+
+130 → 131 testes pytest (novo: `test_status_reports_total_rows_from_memory_not_a_query`,
+mais os testes de `bucket_client_port`/`compact_client_flow_aggs` em
+`test_storage.py`).
 
 ### v1.12.0 — 2026-07-02 — Mitigação direta na borda (SSH/ACL), sem depender do FlowGuard
 - Até aqui o único jeito de bloquear um cliente abusivo era `block_add`/`del`/

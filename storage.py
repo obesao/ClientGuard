@@ -94,6 +94,72 @@ def connect(db_path: str, check_same_thread: bool = True) -> sqlite3.Connection:
     return conn
 
 
+def bucket_client_port(port: int, keep_ports) -> int:
+    """Colapsa a porta de origem do CLIENTE (não o dst_port do outro lado) pra 0,
+    exceto quando é uma das portas de serviço que detect_amplifier precisa
+    distinguir com exatidão (cliente hospedando o serviço, respondendo a partir
+    dela). Nenhum outro detector olha src_port — sem isso, cada conexão TCP/UDP do
+    cliente vira uma porta de origem efêmera distinta, inflando client_flow_aggs em
+    ordens de grandeza sem nenhum valor de detecção (achado real em produção: ~78k
+    linhas num ciclo de ~40s, ~41k valores distintos de src_port nesse mesmo ciclo,
+    o mesmo (src_ip,dst_ip,dst_port,protocolo) repetido até 63x só pela porta
+    efêmera variar) — mesma classe do bug já corrigido no flow_aggs do FlowGuard."""
+    return port if port in keep_ports else 0
+
+
+def compact_client_flow_aggs(conn: sqlite3.Connection, amplifier_ports) -> tuple[int, int]:
+    """Reescreve client_flow_aggs agrupando por (ts, src_ip, customer_prefix,
+    src_port já bucketizado, dst_ip, dst_port, protocol, dst_asn, dst_country),
+    somando bytes/packets — remove só a duplicidade introduzida pela porta efêmera
+    do cliente (ver bucket_client_port), preserva o total de bytes/pacotes (soma
+    invariante). Rodar com o daemon parado (ver tools/compact_client_flow_aggs.py).
+    Retorna (linhas_antes, linhas_depois)."""
+    before = conn.execute("SELECT COUNT(*) FROM client_flow_aggs").fetchone()[0]
+    keep_ports = ",".join(str(int(p)) for p in amplifier_ports) or "-1"
+    conn.execute("DROP TABLE IF EXISTS client_flow_aggs_compact")
+    conn.execute(
+        """CREATE TABLE client_flow_aggs_compact (
+             id              INTEGER PRIMARY KEY,
+             ts              INTEGER NOT NULL,
+             src_ip          TEXT NOT NULL,
+             customer_prefix TEXT,
+             src_port        INTEGER NOT NULL DEFAULT 0,
+             dst_ip          TEXT NOT NULL,
+             dst_port        INTEGER NOT NULL,
+             protocol        INTEGER NOT NULL,
+             bytes           INTEGER NOT NULL,
+             packets         INTEGER NOT NULL,
+             dst_asn         INTEGER,
+             dst_country     TEXT
+           )"""
+    )
+    conn.execute(
+        f"""INSERT INTO client_flow_aggs_compact
+              (ts, src_ip, customer_prefix, src_port, dst_ip, dst_port, protocol,
+               bytes, packets, dst_asn, dst_country)
+            SELECT ts, src_ip, customer_prefix,
+                   CASE WHEN src_port IN ({keep_ports}) THEN src_port ELSE 0 END,
+                   dst_ip, dst_port, protocol, SUM(bytes), SUM(packets), dst_asn, dst_country
+            FROM client_flow_aggs
+            GROUP BY ts, src_ip, customer_prefix, 4, dst_ip, dst_port, protocol, dst_asn, dst_country"""
+    )
+    conn.execute("DROP TABLE client_flow_aggs")
+    conn.execute("ALTER TABLE client_flow_aggs_compact RENAME TO client_flow_aggs")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_client_flow_ts ON client_flow_aggs(ts)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_client_flow_src ON client_flow_aggs(src_ip, ts)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_client_flow_dst ON client_flow_aggs(dst_ip, dst_port, ts)")
+    # ANALYZE é essencial aqui, não cosmético — achado real: sem estatísticas frescas
+    # pra tabela recém-reescrita, o query planner escolheu SCAN completo do índice
+    # (src_ip, ts) pra COUNT(DISTINCT src_ip), ~2s mesmo filtrando só os últimos 30s;
+    # com ANALYZE, vira SEARCH pelo mesmo índice em ~0.1s. prune_old_aggs já roda
+    # ANALYZE depois de cada DELETE, mas isso só acontece de novo ~1x/hora — sem
+    # rodar aqui, a tabela fica com plano ruim até o próximo prune periódico.
+    conn.execute("ANALYZE client_flow_aggs")
+    conn.commit()
+    after = conn.execute("SELECT COUNT(*) FROM client_flow_aggs").fetchone()[0]
+    return before, after
+
+
 def insert_client_flow_aggs_batch(conn: sqlite3.Connection, rows: list[dict]) -> None:
     if not rows:
         return
@@ -196,6 +262,12 @@ def top_src_ips(conn: sqlite3.Connection, window_s: int, limit: int) -> list[dic
 
 
 def daemon_stats(conn: sqlite3.Connection, window_s: int) -> dict:
+    """Não inclui total_rows de propósito — um COUNT(*) sem WHERE sobre
+    client_flow_aggs é uma varredura da tabela inteira (achado real: ~2.5s sob
+    ~26M linhas, chamado a cada poll de status do portal) sem nenhum ganho real
+    de precisão sobre manter a contagem incremental em memória no daemon (ver
+    ClientGuardDaemon.total_rows em clientguard.py, atualizado a cada
+    insert/prune em vez de recontado a cada status)."""
     since = int(time.time()) - window_s
     flows_window = conn.execute(
         "SELECT COUNT(*) FROM client_flow_aggs WHERE ts >= ?", (since,),
@@ -203,11 +275,10 @@ def daemon_stats(conn: sqlite3.Connection, window_s: int) -> dict:
     distinct_src_ips = conn.execute(
         "SELECT COUNT(DISTINCT src_ip) FROM client_flow_aggs WHERE ts >= ?", (since,),
     ).fetchone()[0]
-    total_rows = conn.execute("SELECT COUNT(*) FROM client_flow_aggs").fetchone()[0]
     open_signals = conn.execute("SELECT COUNT(*) FROM suspicious_clients WHERE resolved = 0").fetchone()[0]
     return {
         "flows_window": flows_window, "distinct_src_ips": distinct_src_ips,
-        "total_rows": total_rows, "open_signals": open_signals,
+        "open_signals": open_signals,
     }
 
 

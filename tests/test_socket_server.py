@@ -21,12 +21,17 @@ class FakeDaemon:
     def __init__(self, conn, tmp_path):
         self.conn = conn
         self.db_lock = threading.Lock()
+        self.total_rows = 0
+        self.started_at = 0
+        self.customers = []
+        self.whitelist = []
         self.config = {
             "daemon": {"socket": "/tmp/nao-usado.sock"},
             "flowguard_socket": "/var/run/flowguard.sock",
             "flowguard_reuse": {"path": str(tmp_path / "flowguard")},
             "edge_mitigation_file": str(tmp_path / "edge_mitigation.yaml"),
-            "database": {"aggregate_interval_s": 30},
+            "database": {"aggregate_interval_s": 30, "path": str(tmp_path / "client_flow.sqlite")},
+            "capture": {"iface": "ens18", "bpf_filter": "udp port 2055"},
         }
         self.edge_cfg = edge_mitigation.load_config(self.config["edge_mitigation_file"])
         self.edge_cfg["warmode_device"] = "NE8000 borda"
@@ -50,8 +55,11 @@ def _write_warmode_yaml(tmp_path):
 
 
 @pytest.fixture
-def conn():
-    c = storage.connect(":memory:", check_same_thread=False)
+def conn(tmp_path):
+    # arquivo real (não :memory:) — os comandos de leitura do socket agora abrem
+    # uma segunda conexão read-only pro mesmo arquivo (ver socket_server._read_only_conn),
+    # o que :memory: não permite (cada conexão em memória é isolada).
+    c = storage.connect(str(tmp_path / "client_flow.sqlite"), check_same_thread=False)
     yield c
     c.close()
 
@@ -192,6 +200,17 @@ def test_edge_set_auto_unknown_detector_rejected(server):
 def test_edge_set_auto_requires_nonempty_dict(server):
     resp = server.dispatch({"cmd": "edge_set_auto", "auto_mitigate": {}})
     assert resp["ok"] is False
+
+
+def test_status_reports_total_rows_from_memory_not_a_query(server):
+    # total_rows vem de d.total_rows (contador incremental no daemon), não de um
+    # COUNT(*) na hora — achado real: COUNT(*) sem WHERE em client_flow_aggs virou
+    # uma varredura de tabela inteira (~2.5s sob ~26M linhas) chamada a cada poll
+    # de status do portal.
+    server.daemon_ref.total_rows = 12345
+    resp = server.dispatch({"cmd": "status"})
+    assert resp["ok"] is True
+    assert resp["total_rows"] == 12345
 
 
 def test_dispatch_unknown_command(server):

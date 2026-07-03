@@ -4,6 +4,7 @@ __pycache__/
 db/*.sqlite
 db/*.sqlite-shm
 db/*.sqlite-wal
+db/*.bak-preCompact
 db/threat_ips.txt
 *.log
 logs/
