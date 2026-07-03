@@ -19,28 +19,33 @@ capture:
   # recebe via bind de socket (não depende de interface), só a captura passiva
   # do ClientGuard (scapy.sniff) é sensível a isso.
   iface: ens18
-  # 2055: mesmo tráfego que já chega pro FlowGuard (NE8000), só observado.
+  # 2055: NE8000BGP (mesmo feed do FlowGuard) — DESLIGADO 2026-07-03 a pedido do
+  # usuário: ClientGuard passou a escutar só a caixa PPPOE, não mais as 2 caixas
+  # (BGP + PPPOE) ao mesmo tempo.
   # 2056: NetFlow do A10 (CGNAT) — PAUSADO 2026-07-03 a pedido do usuário: sem
   # sampling configurado no equipamento, o volume (~157k flows/25s) estourava a
   # fila interna do daemon (200k, drenada 1x por ciclo de 30s), descartando
-  # dezenas de milhares de flows/min. Vamos receber via NE8000-PPPOE (Huawei)
-  # na porta 2060 em vez disso.
+  # dezenas de milhares de flows/min.
   # 2060: NetFlow do NE8000-PPPOE (Huawei), peer 177.86.23.225 (confirmado via
   # tcpdump 2026-07-03, IP de export — diferente do IP de gerência SSH usado no
-  # warmode.yaml). Volume bem menor que o A10 (~155 flows/s vs ~6300/s), sem
-  # risco de estourar a fila interna. Mistura tráfego de clientes CGNAT
-  # (src_ip em 100.64.0.0/16, pré-NAT — 42% dos registros numa amostra) e de
-  # clientes com IP público direto (177.86.16.0/24 etc, já cadastrados em
-  # customers.yaml) — faz sentido, é o agregador de sessões PPPoE, não só CGNAT.
-  bpf_filter: "udp port 2055 or udp port 2060"
-  sampling_rate: 1000            # mesmo valor do NE8000 usado pelo FlowGuard (collector.sampling_rate)
+  # warmode.yaml). Único feed ativo agora. Volume bem menor que o A10 (~155
+  # flows/s vs ~6300/s), sem risco de estourar a fila interna. Mistura tráfego
+  # de clientes CGNAT (src_ip em 100.64.0.0/16, pré-NAT — 42% dos registros numa
+  # amostra) e de clientes com IP público direto (177.86.16.0/24 etc, já
+  # cadastrados em customers.yaml) — faz sentido, é o agregador de sessões
+  # PPPoE, não só CGNAT.
+  bpf_filter: "udp port 2060"
+  # fallback pra peer sem entrada em sampling_rate_by_peer — não usado agora que
+  # o único feed ativo (177.86.23.225) já tem override abaixo, mantido caso um
+  # novo peer seja adicionado sem calibrar o sampling primeiro.
+  sampling_rate: 1000
   # sampling_rate_by_peer: sobrescreve sampling_rate acima por IP de origem do
   # export (peer) — necessário quando o exportador não preenche o campo
-  # SAMPLING_INTERVAL (34) do NetFlow e a taxa real difere do valor global
-  # (calibrado pro NE8000/FlowGuard em 2055). 177.86.23.225 (NE8000-PPPOE) não
-  # preenche esse campo (confirmado via captura real) — assumindo 1:1 (sem
-  # amostragem), mesma lógica aplicada ao A10 (log completo de sessão, não
-  # telemetria amostrada). CONFIRMAR com o equipamento se isso mudar.
+  # SAMPLING_INTERVAL (34) do NetFlow e a taxa real difere do valor global.
+  # 177.86.23.225 (NE8000-PPPOE) não preenche esse campo (confirmado via
+  # captura real) — assumindo 1:1 (sem amostragem), mesma lógica aplicada ao
+  # A10 (log completo de sessão, não telemetria amostrada). CONFIRMAR com o
+  # equipamento se isso mudar.
   sampling_rate_by_peer:
     "177.86.23.225": 1
 
