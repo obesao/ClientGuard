@@ -171,3 +171,96 @@ def test_geoip_cache_replace_updates_existing_entry(conn):
     storage.save_geoip_batch(conn, [("8.8.8.8", 15169, "US")])
     storage.save_geoip_batch(conn, [("8.8.8.8", 99999, "ZZ")])
     assert storage.load_geoip_cache(conn) == {"8.8.8.8": (99999, "ZZ")}
+
+
+# --- baseline de tráfego por cliente (client_traffic_baseline) ---------------
+
+def test_update_traffic_baselines_first_sample(conn):
+    now = int(time.time())
+    storage.update_traffic_baselines(conn, [("1.2.3.4", "dns_query", 10000, 0.1, now, None)])
+    b = storage.get_baseline_for(conn, "1.2.3.4", "dns_query")
+    assert b["bps_mean"] == 10000
+    assert b["bps_var"] == 0
+    assert b["samples"] == 1
+
+
+def test_update_traffic_baselines_ewma_uses_previous_row(conn):
+    now = int(time.time())
+    storage.update_traffic_baselines(conn, [("1.2.3.4", "dns_query", 10000, 0.5, now, None)])
+    prev = storage.get_baseline_for(conn, "1.2.3.4", "dns_query")
+    storage.update_traffic_baselines(conn, [("1.2.3.4", "dns_query", 20000, 0.5, now, prev)])
+    b = storage.get_baseline_for(conn, "1.2.3.4", "dns_query")
+    assert b["bps_mean"] == 15000  # mean + 0.5*(20000-10000)
+    assert b["samples"] == 2
+
+
+def test_update_traffic_baselines_distinct_traffic_classes_dont_collide(conn):
+    now = int(time.time())
+    storage.update_traffic_baselines(conn, [
+        ("1.2.3.4", "dns_query", 1000, 0.1, now, None),
+        ("1.2.3.4", "amplifier:53", 2000, 0.1, now, None),
+    ])
+    assert storage.get_baseline_for(conn, "1.2.3.4", "dns_query")["bps_mean"] == 1000
+    assert storage.get_baseline_for(conn, "1.2.3.4", "amplifier:53")["bps_mean"] == 2000
+
+
+def test_get_baselines_for_scopes_to_requested_src_ips(conn):
+    now = int(time.time())
+    storage.update_traffic_baselines(conn, [
+        ("1.2.3.4", "dns_query", 1000, 0.1, now, None),
+        ("5.6.7.8", "dns_query", 2000, 0.1, now, None),
+    ])
+    scoped = storage.get_baselines_for(conn, ["1.2.3.4"])
+    assert set(scoped.keys()) == {("1.2.3.4", "dns_query")}
+
+
+def test_get_baselines_for_empty_list_returns_empty(conn):
+    assert storage.get_baselines_for(conn, []) == {}
+
+
+def test_prune_stale_baselines_removes_only_old_entries(conn):
+    old_ts = int(time.time()) - 30 * 86400
+    recent_ts = int(time.time())
+    conn.execute(
+        "INSERT INTO client_traffic_baseline (src_ip, traffic_class, bps_mean, bps_var, samples, updated_at) "
+        "VALUES (?, ?, 0, 0, 1, ?)", ("1.2.3.4", "dns_query", old_ts),
+    )
+    conn.execute(
+        "INSERT INTO client_traffic_baseline (src_ip, traffic_class, bps_mean, bps_var, samples, updated_at) "
+        "VALUES (?, ?, 0, 0, 1, ?)", ("5.6.7.8", "dns_query", recent_ts),
+    )
+    conn.commit()
+    removed = storage.prune_stale_baselines(conn, stale_days=14)
+    assert removed == 1
+    assert storage.get_baseline_for(conn, "1.2.3.4", "dns_query") is None
+    assert storage.get_baseline_for(conn, "5.6.7.8", "dns_query") is not None
+
+
+def test_recent_signal_src_ips_filters_by_type_and_time(conn):
+    now = int(time.time())
+    storage.insert_suspicious_client(conn, {
+        "src_ip": "1.2.3.4", "customer_prefix": None, "signal_type": "dns_tunneling",
+        "confidence": 1.0, "evidence": "{}",
+    })
+    storage.insert_suspicious_client(conn, {
+        "src_ip": "5.6.7.8", "customer_prefix": None, "signal_type": "spam_bot",
+        "confidence": 1.0, "evidence": "{}",
+    })
+    assert storage.recent_signal_src_ips(conn, "dns_tunneling", now) == {"1.2.3.4"}
+    assert storage.recent_signal_src_ips(conn, "dns_tunneling", now + 3600) == set()
+
+
+def test_count_active_edge_mitigations_filters_by_mechanism(conn):
+    storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "auto", mechanism="flowspec")
+    storage.insert_edge_mitigation(conn, "5.6.7.8", None, 3600, "auto", mechanism="ssh")
+    assert storage.count_active_edge_mitigations(conn, "flowspec") == 1
+    assert storage.count_active_edge_mitigations(conn, "ssh") == 1
+
+
+def test_list_due_edge_mitigations_filters_by_mechanism(conn):
+    storage.insert_edge_mitigation(conn, "1.2.3.4", None, -10, "auto", mechanism="flowspec")
+    storage.insert_edge_mitigation(conn, "5.6.7.8", None, -10, "auto", mechanism="ssh")
+    due_flowspec = storage.list_due_edge_mitigations(conn, mechanism="flowspec")
+    assert {r["src_ip"] for r in due_flowspec} == {"1.2.3.4"}
+    due_all = storage.list_due_edge_mitigations(conn)
+    assert {r["src_ip"] for r in due_all} == {"1.2.3.4", "5.6.7.8"}

@@ -220,10 +220,13 @@ def revert_and_record(conn: sqlite3.Connection, db_lock, mitigation_id: int,
 
 
 def expire_due(conn: sqlite3.Connection, db_lock, cfg: dict, flowguard_path: str) -> int:
-    """Chamado periodicamente pelo loop do daemon — reverte mitigações cujo TTL venceu."""
+    """Chamado periodicamente pelo loop do daemon — reverte mitigações cujo TTL venceu.
+    mechanism='ssh' explícito: só processa mitigações deste módulo legado — as novas
+    (mechanism='flowspec') são responsabilidade de flowspec_mitigation.expire_due, que
+    roda em paralelo (ver clientguard.py)."""
     lock = db_lock or nullcontext()
     with lock:
-        due = storage.list_due_edge_mitigations(conn)
+        due = storage.list_due_edge_mitigations(conn, mechanism="ssh")
     for row in due:
         revert_and_record(conn, db_lock, row["id"], cfg, flowguard_path)
     return len(due)

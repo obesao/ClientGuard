@@ -20,23 +20,25 @@ capture:
   # do ClientGuard (scapy.sniff) é sensível a isso.
   iface: ens18
   # 2055: mesmo tráfego que já chega pro FlowGuard (NE8000), só observado.
-  # 2056: NetFlow do A10 (CGNAT) — confirmado por captura real (2026-07-03) que
-  # o src_ip aqui é PRÉ-NAT (IP interno do cliente em 100.64.0.0/16, não o IP
-  # público compartilhado), então cada cliente já chega identificável sem
-  # precisar de client_multiplier.
-  bpf_filter: "udp port 2055 or udp port 2056"
+  # 2056: NetFlow do A10 (CGNAT) — PAUSADO 2026-07-03 a pedido do usuário: sem
+  # sampling configurado no equipamento, o volume (~157k flows/25s) estourava a
+  # fila interna do daemon (200k, drenada 1x por ciclo de 30s), descartando
+  # dezenas de milhares de flows/min. Vamos receber via NE8000-PPPOE (Huawei)
+  # na porta 2060 em vez disso.
+  # 2060: NetFlow do NE8000-PPPOE (Huawei) — em teste 2026-07-03. Ainda não
+  # confirmado se vem pré ou pós-NAT nem a taxa de sampling real (ver
+  # sampling_rate_by_peer abaixo, placeholder até a captura real confirmar).
+  bpf_filter: "udp port 2055 or udp port 2060"
   sampling_rate: 1000            # mesmo valor do NE8000 usado pelo FlowGuard (collector.sampling_rate)
   # sampling_rate_by_peer: sobrescreve sampling_rate acima por IP de origem do
-  # export (peer) — necessário porque o A10 não preenche o campo
-  # SAMPLING_INTERVAL (34) do NetFlow, então sem isso ele herdaria o 1000 do
-  # NE8000, que está errado pra ele. 177.86.23.234 (A10, confirmado via
-  # tcpdump 2026-07-03) não tem sampling configurado no equipamento ("Records
-  # 1000"/"Time 1800s"/"Flow timeout 10" são parâmetros de exportação, não uma
-  # taxa de amostragem) — assumindo 1:1 (sem amostragem), típico de log de
-  # CGNAT pra resolver abuso por IP+porta+timestamp. CONFIRMAR com o
-  # equipamento se isso mudar.
-  sampling_rate_by_peer:
-    "177.86.23.234": 1
+  # export (peer) — necessário quando o exportador não preenche o campo
+  # SAMPLING_INTERVAL (34) do NetFlow (caso do A10, pausado acima) e a taxa
+  # real difere do valor global (calibrado pro NE8000/FlowGuard em 2055).
+  # A entrada do A10 (177.86.23.234) foi removida junto com a pausa da porta
+  # 2056 — sem tráfego chegando ali, a chave ficaria morta/confusa no config.
+  # PENDENTE: confirmar via captura real se o NE8000-PPPOE (porta 2060)
+  # preenche o campo de sampling sozinho ou precisa de uma entrada aqui.
+  sampling_rate_by_peer: {}
 
 database:
   path: /root/clientguard/db/client_flow.sqlite
@@ -55,11 +57,25 @@ whitelist_file: /root/clientguard/whitelist.yaml
 # ou arquivo inexistente = habilitado (não muda comportamento pra quem não usar isso)
 feature_toggles_file: /root/clientguard/toggles.yaml
 
-# mitigação direta na borda (SSH/ACL no roteador) por src_ip — ver
-# edge_mitigation.yaml (equipamento/ACL/gatilhos automáticos por detector). Reaproveita
-# as credenciais SSH já cadastradas no warmode.yaml do FlowGuard (flowguard_reuse.path
-# abaixo aponta pra onde procurar esse arquivo).
+# mitigação direta na borda (SSH/ACL no roteador) por src_ip — legado, mantido só
+# pra reverter mitigações SSH já ativas de antes da migração pra FlowSpec (ver
+# flowspec_mitigation_file abaixo). Nenhum gatilho automático NOVO usa este caminho.
 edge_mitigation_file: /root/clientguard/edge_mitigation.yaml
+
+# mitigação via BGP FlowSpec (proxy pro FlowGuard, sem SSH) — substitui
+# edge_mitigation_file como caminho de auto-mitigação. Ver flowspec_mitigation.yaml
+# (ação por detector: discard/rate_limit/off, orçamento de regras, piso de rate-limit).
+flowspec_mitigation_file: /root/clientguard/flowspec_mitigation.yaml
+
+# baseline EWMA por cliente (tráfego de DNS e de portas de amplificação), usada só
+# pra calcular o rate-limit DINÂMICO do FlowSpec — não afeta os limiares de detecção
+# em si (esses continuam em detection: acima). window_minutes/min_samples no mesmo
+# espírito do baseline do FlowGuard (prefix_baseline); stale_days poda cliente que
+# sumiu/trocou de IP.
+dns_baseline:
+  window_minutes: 180
+  min_samples: 120
+  stale_days: 14
 
 detection:
   scan_horizontal_hosts: 30      # N destinos distintos, mesma porta, pra contar como scan horizontal

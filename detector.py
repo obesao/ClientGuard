@@ -17,7 +17,7 @@ import sqlite3
 import time
 from contextlib import nullcontext
 
-import edge_mitigation
+import flowspec_mitigation
 import notifier
 import storage
 
@@ -26,7 +26,8 @@ LOG = logging.getLogger("clientguard.detector")
 
 def _record_signal(conn: sqlite3.Connection, src_ip: str, customer_prefix: str | None,
                     signal_type: str, confidence: float, evidence: dict, webhook_url: str = "",
-                    ai_client=None, db_lock=None, wa_cfg: dict = None, edge_ctx: dict = None) -> None:
+                    ai_client=None, db_lock=None, wa_cfg: dict = None, mitigation_ctx: dict = None,
+                    mitigation_match: dict = None) -> None:
     lock = db_lock or nullcontext()
     evidence_json = json.dumps(evidence, ensure_ascii=False)
     with lock:
@@ -41,10 +42,14 @@ def _record_signal(conn: sqlite3.Connection, src_ip: str, customer_prefix: str |
     LOG.warning("sinal novo: %s src_ip=%s prefix=%s evidencia=%s",
                 signal_type, src_ip, customer_prefix, evidence_json)
 
-    edge_ctx = edge_ctx or {}
-    if edge_ctx.get("cfg", {}).get("auto_mitigate", {}).get(signal_type):
-        edge_mitigation.trigger_async(conn, db_lock, src_ip, signal_id,
-                                       edge_ctx["cfg"], edge_ctx["flowguard_path"])
+    mitigation_ctx = mitigation_ctx or {}
+    mitigation_action = mitigation_ctx.get("cfg", {}).get("auto_mitigate", {}).get(signal_type, "off")
+    if mitigation_action in ("discard", "rate_limit"):
+        flowspec_mitigation.trigger_async(
+            conn, db_lock, src_ip, signal_id, signal_type, mitigation_match,
+            mitigation_ctx["cfg"], mitigation_ctx["fg_socket_path"],
+            mitigation_ctx.get("baseline_min_samples", 120),
+        )
 
     explanation = None
     if ai_client is not None:
@@ -93,7 +98,7 @@ def _group_scaled_threshold(base: float, group_prefixes, multipliers: dict) -> f
 def detect_scan_horizontal(conn: sqlite3.Connection, window_s: int, threshold: int, whitelist: set,
                             exclude_ports: list[int] = (), multipliers: dict = None,
                             max_avg_bytes: float = None, webhook_url: str = "", ai_client=None,
-                            db_lock=None, wa_cfg: dict = None, edge_ctx: dict = None) -> None:
+                            db_lock=None, wa_cfg: dict = None, mitigation_ctx: dict = None) -> None:
     """1 src_ip -> N dst_ip distintos, mesma dst_port -> varredura horizontal (reconhecimento).
 
     exclude_ports precisa cobrir portas de web/CDN (443/80) — sem isso, qualquer navegação
@@ -137,12 +142,12 @@ def detect_scan_horizontal(conn: sqlite3.Connection, window_s: int, threshold: i
                         min(1.0, r["n_hosts"] / (effective * 2)),
                         {"dst_port": r["dst_port"], "n_hosts": r["n_hosts"], "avg_bytes": round(avg_bytes),
                          "window_s": window_s},
-                        webhook_url, ai_client, db_lock, wa_cfg, edge_ctx)
+                        webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx)
 
 
 def detect_scan_vertical(conn: sqlite3.Connection, window_s: int, threshold: int, whitelist: set,
                           multipliers: dict = None, max_avg_bytes: float = None, webhook_url: str = "",
-                          ai_client=None, db_lock=None, wa_cfg: dict = None, edge_ctx: dict = None) -> None:
+                          ai_client=None, db_lock=None, wa_cfg: dict = None, mitigation_ctx: dict = None) -> None:
     """1 src_ip -> N dst_port distintas, mesmo dst_ip -> varredura de vulnerabilidade.
 
     multipliers escala o limiar pra prefixos CGNAT — ver docstring de detect_scan_horizontal.
@@ -172,12 +177,12 @@ def detect_scan_vertical(conn: sqlite3.Connection, window_s: int, threshold: int
                         min(1.0, r["n_ports"] / (effective * 2)),
                         {"dst_ip": r["dst_ip"], "n_ports": r["n_ports"], "avg_bytes": round(avg_bytes),
                          "window_s": window_s},
-                        webhook_url, ai_client, db_lock, wa_cfg, edge_ctx)
+                        webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx)
 
 
 def detect_amplifier(conn: sqlite3.Connection, window_s: int, ports: list[int], min_bps: float,
                       whitelist: set, multipliers: dict = None, webhook_url: str = "", ai_client=None,
-                      db_lock=None, wa_cfg: dict = None, edge_ctx: dict = None) -> None:
+                      db_lock=None, wa_cfg: dict = None, mitigation_ctx: dict = None) -> None:
     """src_ip do cliente respondendo (src_port em porta de serviço UDP conhecida) pra
     vários destinos externos em volume alto -> resolver/serviço aberto sendo abusado
     como refletor de amplificação.
@@ -205,12 +210,13 @@ def detect_amplifier(conn: sqlite3.Connection, window_s: int, ports: list[int], 
         _record_signal(conn, r["src_ip"], r["customer_prefix"], "amplifier_hosted",
                         min(1.0, bps / (effective_min_bps * 4)),
                         {"src_port": r["src_port"], "bps": round(bps), "n_dst": r["n_dst"], "window_s": window_s},
-                        webhook_url, ai_client, db_lock, wa_cfg, edge_ctx)
+                        webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx,
+                        {"protocol": "udp", "src_port": str(r["src_port"])})
 
 
 def detect_spam(conn: sqlite3.Connection, window_s: int, spam_ports: list[int], min_distinct_dest: int,
                  whitelist: set, multipliers: dict = None, webhook_url: str = "", ai_client=None,
-                 db_lock=None, wa_cfg: dict = None, edge_ctx: dict = None) -> None:
+                 db_lock=None, wa_cfg: dict = None, mitigation_ctx: dict = None) -> None:
     """src_ip do cliente com TCP outbound em porta de e-mail (25/465/587) pra muitos
     destinos distintos -> host comprometido enviando spam.
 
@@ -235,12 +241,12 @@ def detect_spam(conn: sqlite3.Connection, window_s: int, spam_ports: list[int], 
         _record_signal(conn, r["src_ip"], r["customer_prefix"], "spam_bot",
                         min(1.0, r["n_dst"] / (effective * 2)),
                         {"n_dst": r["n_dst"], "window_s": window_s},
-                        webhook_url, ai_client, db_lock, wa_cfg, edge_ctx)
+                        webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx)
 
 
 def detect_malicious_contact(conn: sqlite3.Connection, window_s: int, threat_feed, whitelist: set,
                               webhook_url: str = "", ai_client=None, db_lock=None, wa_cfg: dict = None,
-                              edge_ctx: dict = None) -> None:
+                              mitigation_ctx: dict = None) -> None:
     """src_ip do cliente troca tráfego com um dst_ip conhecido de C2/malware/spam (feed
     público: Feodo Tracker, Spamhaus DROP/EDROP, ipsum) -> host possivelmente comprometido.
     Detecção por reputação, não por volume/padrão como os outros detectores."""
@@ -265,13 +271,13 @@ def detect_malicious_contact(conn: sqlite3.Connection, window_s: int, threat_fee
             continue
         _record_signal(conn, r["src_ip"], r["customer_prefix"], "malicious_contact", 0.9,
                         {"dst_ip": r["dst_ip"], "window_s": window_s},
-                        webhook_url, ai_client, db_lock, wa_cfg, edge_ctx)
+                        webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx)
 
 
 def detect_shared_destination(conn: sqlite3.Connection, window_s: int, min_distinct_clients: int,
                                exclude_ports: list[int], whitelist: set, multipliers: dict = None,
                                webhook_url: str = "", ai_client=None, db_lock=None, wa_cfg: dict = None,
-                               edge_ctx: dict = None) -> None:
+                               mitigation_ctx: dict = None) -> None:
     """N clientes distintos (>= min_distinct_clients) falando com o MESMO dst_ip:dst_port
     fora das portas web/DNS comuns (exclude_ports, tráfego normal de internet faz isso o
     tempo todo em CDN/HTTPS/DNS) -> indício de C2/botnet coordenado atingindo vários
@@ -315,12 +321,12 @@ def detect_shared_destination(conn: sqlite3.Connection, window_s: int, min_disti
                             {"dst_ip": g["dst_ip"], "dst_port": g["dst_port"], "n_clients": g["n_clients"],
                              "other_clients": [ip for ip in client_ips if ip != c["src_ip"]][:10],
                              "window_s": window_s},
-                            webhook_url, ai_client, db_lock, wa_cfg, edge_ctx)
+                            webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx)
 
 
 def detect_dns_tunneling(conn: sqlite3.Connection, window_s: int, min_queries: int, whitelist: set,
                           multipliers: dict = None, webhook_url: str = "", ai_client=None,
-                          db_lock=None, wa_cfg: dict = None, edge_ctx: dict = None) -> None:
+                          db_lock=None, wa_cfg: dict = None, mitigation_ctx: dict = None) -> None:
     """src_ip do cliente faz um volume alto de queries DNS (muitos pacotes pequenos, não
     poucos grandes — diferente do amplifier_hosted, que é sobre volume de RESPOSTA) pro
     MESMO servidor externo -> indício de túnel DNS/exfiltração via subdomínios codificados,
@@ -351,20 +357,24 @@ def detect_dns_tunneling(conn: sqlite3.Connection, window_s: int, min_queries: i
                         min(1.0, r["n_queries"] / (effective * 2)),
                         {"dst_ip": r["dst_ip"], "n_queries": r["n_queries"], "avg_pkt_bytes": avg_pkt_bytes,
                          "window_s": window_s},
-                        webhook_url, ai_client, db_lock, wa_cfg, edge_ctx)
+                        webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx,
+                        {"protocol": "udp", "dst_port": "53"})
 
 
 def run_all(conn: sqlite3.Connection, config: dict, whitelist: set, customers: list[dict] = (),
             ai_client=None, threat_feed=None, db_lock=None, toggles: dict = None,
-            edge_cfg: dict = None) -> None:
+            mitigation_cfg: dict = None) -> None:
     """toggles (ver configio.DEFAULT_FEATURE_TOGGLES) liga/desliga cada detector
     individualmente, e ai_explanations liga/desliga a explicação de IA pra qualquer
     sinal que dispare nesse ciclo — chave ausente = habilitado, pra não mudar
     comportamento de quem nunca configurou toggles.yaml.
 
-    edge_cfg (ver edge_mitigation.DEFAULT_CONFIG) liga o gatilho automático de
-    mitigação direta na borda por tipo de sinal — None desativa completamente (nenhum
-    detector dispara mitigação sozinho, só o botão manual do portal/CLI funciona)."""
+    mitigation_cfg (ver flowspec_mitigation.DEFAULT_CONFIG) liga o gatilho automático
+    de mitigação via BGP FlowSpec por tipo de sinal (discard/rate_limit/off) — None
+    desativa completamente (nenhum detector dispara mitigação sozinho, só o botão
+    manual do portal/CLI funciona). Substitui o antigo edge_cfg (SSH/ACL) como
+    caminho de auto-mitigação; edge_mitigation.py continua existindo só pra reverter
+    mitigações SSH já ativas de antes desta migração."""
     toggles = toggles or {}
 
     def on(key: str) -> bool:
@@ -374,9 +384,13 @@ def run_all(conn: sqlite3.Connection, config: dict, whitelist: set, customers: l
     alerts_cfg = config.get("alerts", {})
     webhook_url = alerts_cfg.get("webhook_url", "")
     wa_cfg = alerts_cfg
-    edge_ctx = None
-    if edge_cfg:
-        edge_ctx = {"cfg": edge_cfg, "flowguard_path": config.get("flowguard_reuse", {}).get("path", "/root/flowguard")}
+    mitigation_ctx = None
+    if mitigation_cfg:
+        mitigation_ctx = {
+            "cfg": mitigation_cfg,
+            "fg_socket_path": config.get("flowguard_socket", "/var/run/flowguard.sock"),
+            "baseline_min_samples": config.get("dns_baseline", {}).get("min_samples", 120),
+        }
     # customer_prefix -> fator: quantas identidades reais um único src_ip visível daquele
     # prefixo pode representar (ex.: pool de CGNAT). Default implícito é 1 (sem ajuste).
     multipliers = {c["prefix"]: c["client_multiplier"] for c in customers
@@ -386,23 +400,23 @@ def run_all(conn: sqlite3.Connection, config: dict, whitelist: set, customers: l
     if on("scan_horizontal"):
         detect_scan_horizontal(conn, det["window_s"], det["scan_horizontal_hosts"], whitelist,
                                 det["common_service_ports"], multipliers, max_avg_bytes,
-                                webhook_url, ai, db_lock, wa_cfg, edge_ctx)
+                                webhook_url, ai, db_lock, wa_cfg, mitigation_ctx)
     if on("scan_vertical"):
         detect_scan_vertical(conn, det["window_s"], det["scan_vertical_ports"], whitelist,
-                              multipliers, max_avg_bytes, webhook_url, ai, db_lock, wa_cfg, edge_ctx)
+                              multipliers, max_avg_bytes, webhook_url, ai, db_lock, wa_cfg, mitigation_ctx)
     if on("amplifier"):
         detect_amplifier(conn, det["window_s"], det["amplifier_ports"], det["amplifier_min_bps"], whitelist,
-                          multipliers, webhook_url, ai, db_lock, wa_cfg, edge_ctx)
+                          multipliers, webhook_url, ai, db_lock, wa_cfg, mitigation_ctx)
     if on("spam"):
         detect_spam(conn, det["window_s"], det["spam_ports"], det["spam_min_distinct_dest"], whitelist,
-                    multipliers, webhook_url, ai, db_lock, wa_cfg, edge_ctx)
+                    multipliers, webhook_url, ai, db_lock, wa_cfg, mitigation_ctx)
     if on("malicious_contact"):
         detect_malicious_contact(conn, det["window_s"], threat_feed, whitelist,
-                                  webhook_url, ai, db_lock, wa_cfg, edge_ctx)
+                                  webhook_url, ai, db_lock, wa_cfg, mitigation_ctx)
     if on("coordinated_destination"):
         detect_shared_destination(conn, det["window_s"], det["coordinated_min_clients"],
                                    det["common_service_ports"], whitelist, multipliers,
-                                   webhook_url, ai, db_lock, wa_cfg, edge_ctx)
+                                   webhook_url, ai, db_lock, wa_cfg, mitigation_ctx)
     if on("dns_tunneling"):
         detect_dns_tunneling(conn, det["window_s"], det["dns_tunneling_min_queries"], whitelist,
-                              multipliers, webhook_url, ai, db_lock, wa_cfg, edge_ctx)
+                              multipliers, webhook_url, ai, db_lock, wa_cfg, mitigation_ctx)

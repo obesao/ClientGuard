@@ -23,6 +23,7 @@ import ai_client
 import configio
 import detector
 import edge_mitigation
+import flowspec_mitigation
 import geoip
 import socket_server
 import storage
@@ -47,8 +48,12 @@ class ClientGuardDaemon:
         self.customers = configio.load_yaml_list(self.config["customer_registry"])
         self.whitelist = WhitelistMatcher(configio.load_yaml_list(self.config["whitelist_file"]))
         self.toggles = configio.load_feature_toggles(self.config.get("feature_toggles_file", ""))
+        # edge_cfg (SSH/ACL) fica só pra reverter mitigações legadas já ativas — todo
+        # gatilho automático NOVO usa flowspec_mitigation_cfg (BGP FlowSpec via FlowGuard).
         self.edge_cfg = edge_mitigation.load_config(
             self.config.get("edge_mitigation_file", edge_mitigation.DEFAULT_CONFIG_PATH))
+        self.flowspec_mitigation_cfg = flowspec_mitigation.load_config(
+            self.config.get("flowspec_mitigation_file", flowspec_mitigation.DEFAULT_CONFIG_PATH))
         self.ai_client = ai_client.AIClient(self.config.get("ai", {}))
         self.threat_feed = threat_feed.ThreatFeed(self.config.get("threat_feed", {}).get("cache_file", ""))
         self.geoip = geoip.GeoIPCache(self.conn, self.db_lock)
@@ -63,6 +68,8 @@ class ClientGuardDaemon:
         self.toggles = configio.load_feature_toggles(self.config.get("feature_toggles_file", ""))
         self.edge_cfg = edge_mitigation.load_config(
             self.config.get("edge_mitigation_file", edge_mitigation.DEFAULT_CONFIG_PATH))
+        self.flowspec_mitigation_cfg = flowspec_mitigation.load_config(
+            self.config.get("flowspec_mitigation_file", flowspec_mitigation.DEFAULT_CONFIG_PATH))
         LOG.info("config recarregado: %d clientes cadastrados, %d na whitelist, toggles=%s",
                  len(self.customers), len(self.whitelist), self.toggles)
 
@@ -107,6 +114,52 @@ class ClientGuardDaemon:
             iface=cap_cfg["iface"], filter=cap_cfg["bpf_filter"], prn=self._handle_packet,
             store=False, stop_filter=lambda _pkt: self._stop.is_set(),
         )
+
+    def _update_traffic_baselines(self, groups: dict, amplifier_ports: set, now: int) -> None:
+        """EWMA por (cliente, classe de tráfego) pro rate-limit dinâmico do FlowSpec —
+        só 'dns_query' e 'amplifier:<porta>' importam (dns_tunneling/amplifier_hosted);
+        os outros tipos de sinal não usam baseline. Reaproveita `groups`, já calculado
+        por aggregate_once — sem query extra. Só busca/atualiza baseline pros src_ips
+        que tiveram tráfego relevante NESTE ciclo (nunca a tabela inteira — ver
+        storage.get_baselines_for)."""
+        bytes_by_key: dict[tuple[str, str], int] = {}
+        for (client_ip, client_port, other_ip, other_port, protocol), g in groups.items():
+            if protocol == 17 and other_port == 53:
+                key = (client_ip, "dns_query")
+                bytes_by_key[key] = bytes_by_key.get(key, 0) + g["bytes"]
+            if protocol == 17 and client_port in amplifier_ports:
+                key = (client_ip, f"amplifier:{client_port}")
+                bytes_by_key[key] = bytes_by_key.get(key, 0) + g["bytes"]
+        if not bytes_by_key:
+            return
+
+        # anti-poisoning: exclui (src_ip, classe) que o próprio detector já flagrou
+        # neste ciclo — senão a baseline aprende o ataque como tráfego normal.
+        poisoned_dns = storage.recent_signal_src_ips(self.conn, "dns_tunneling", now)
+        poisoned_amp = storage.recent_signal_src_ips(self.conn, "amplifier_hosted", now)
+
+        baseline_cfg = self.config.get("dns_baseline", {})
+        interval = self.config["database"]["aggregate_interval_s"]
+        window_minutes = baseline_cfg.get("window_minutes", 180)
+        span = max(1, (window_minutes * 60) / interval)
+        alpha = 2 / (span + 1)
+
+        src_ips = {src_ip for src_ip, _ in bytes_by_key}
+        with self.db_lock:
+            prev = storage.get_baselines_for(self.conn, list(src_ips))
+
+        updates = []
+        for (src_ip, traffic_class), total_bytes in bytes_by_key.items():
+            if traffic_class == "dns_query" and src_ip in poisoned_dns:
+                continue
+            if traffic_class.startswith("amplifier:") and src_ip in poisoned_amp:
+                continue
+            bps = (total_bytes * 8) / interval
+            updates.append((src_ip, traffic_class, bps, alpha, now, prev.get((src_ip, traffic_class))))
+
+        if updates:
+            with self.db_lock:
+                storage.update_traffic_baselines(self.conn, updates)
 
     def aggregate_once(self) -> None:
         records = []
@@ -169,12 +222,19 @@ class ClientGuardDaemon:
                 )
             detector.run_all(self.conn, self.config, self.whitelist, customers=self.customers,
                               ai_client=self.ai_client, threat_feed=self.threat_feed, db_lock=self.db_lock,
-                              toggles=self.toggles, edge_cfg=self.edge_cfg)
+                              toggles=self.toggles, mitigation_cfg=self.flowspec_mitigation_cfg)
+            # depois de run_all, não antes — precisa saber quais (src_ip, classe) foram
+            # flagrados NESTE ciclo pra excluir da baseline (anti-poisoning).
+            self._update_traffic_baselines(groups, amplifier_ports, now)
 
         flowguard_path = self.config.get("flowguard_reuse", {}).get("path", "/root/flowguard")
-        expired = edge_mitigation.expire_due(self.conn, self.db_lock, self.edge_cfg, flowguard_path)
+        fg_socket_path = self.config.get("flowguard_socket", "/var/run/flowguard.sock")
+        expired_ssh = edge_mitigation.expire_due(self.conn, self.db_lock, self.edge_cfg, flowguard_path)
+        expired_flowspec = flowspec_mitigation.expire_due(self.conn, self.db_lock, fg_socket_path)
+        expired = expired_ssh + expired_flowspec
         if expired:
-            LOG.info("mitigação de borda: %d regra(s) revertida(s) por TTL vencido", expired)
+            LOG.info("mitigação de borda: %d regra(s) revertida(s) por TTL vencido (%d ssh, %d flowspec)",
+                      expired, expired_ssh, expired_flowspec)
 
         self._cycle_count += 1
         interval = self.config["database"]["aggregate_interval_s"]
@@ -185,6 +245,11 @@ class ClientGuardDaemon:
                 self.total_rows -= pruned
             if pruned:
                 LOG.info("retenção: %d agregados antigos removidos", pruned)
+            stale_days = self.config.get("dns_baseline", {}).get("stale_days", 14)
+            with self.db_lock:
+                pruned_baselines = storage.prune_stale_baselines(self.conn, stale_days)
+            if pruned_baselines:
+                LOG.info("baseline de tráfego: %d entrada(s) removida(s) por inatividade", pruned_baselines)
 
     def run(self) -> None:
         interval = self.config["database"]["aggregate_interval_s"]

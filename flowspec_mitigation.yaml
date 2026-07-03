@@ -1,0 +1,19 @@
+# flowspec_mitigation.yaml — mitigação via BGP FlowSpec (proxy pro FlowGuard),
+# substitui o antigo edge_mitigation.py (SSH/ACL). auto_mitigate/default_ttl_s
+# editáveis pelo portal ou clientguard-cli flowspec auto set; ação por detector é
+# 'discard' (bloqueio total), 'rate_limit' (limita banda) ou 'off' (não automatiza).
+# max_active_rules/dns_rate_limit_floor_bps/spam_rate_limit_bps/rate_limit_sigma só
+# à mão aqui.
+default_ttl_s: 3600
+max_active_rules: 20
+dns_rate_limit_floor_bps: 200000
+spam_rate_limit_bps: 500000
+rate_limit_sigma: 3
+auto_mitigate:
+  port_scan_horizontal: discard
+  port_scan_vertical: discard
+  spam_bot: rate_limit
+  dns_tunneling: rate_limit
+  amplifier_hosted: rate_limit
+  malicious_contact: 'off'
+  coordinated_destination: 'off'

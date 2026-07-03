@@ -48,19 +48,42 @@ CREATE TABLE IF NOT EXISTS geoip_cache (
   ts      INTEGER NOT NULL
 );
 
--- Mitigação direta na borda (SSH/ACL no roteador) por src_ip — trilha própria,
--- separada de suspicious_clients, porque uma mitigação pode ser reaplicada/estendida
--- (mesmo IP, TTL renovado) sem abrir um novo sinal de detecção.
+-- Mitigação na borda por src_ip — trilha própria, separada de suspicious_clients,
+-- porque uma mitigação pode ser reaplicada/estendida (mesmo IP, TTL renovado) sem
+-- abrir um novo sinal de detecção. mechanism distingue o caminho SSH/ACL original
+-- (Netmiko direto no roteador) do caminho FlowSpec/BGP atual (via socket do
+-- FlowGuard) — linhas antigas ficam 'ssh' (default), novas mitigações usam
+-- 'flowspec'; os dois mecanismos coexistem até a última mitigação SSH expirar
+-- (ver flowspec_mitigation.py e o edge_mitigation.py legado).
 CREATE TABLE IF NOT EXISTS edge_mitigations (
-  id           INTEGER PRIMARY KEY,
-  signal_id    INTEGER,
-  src_ip       TEXT NOT NULL,
-  ts_applied   INTEGER NOT NULL,
-  ts_expires   INTEGER,
-  ts_reverted  INTEGER,
-  status       TEXT NOT NULL DEFAULT 'active',   -- 'active' | 'reverted' | 'failed'
-  trigger_type TEXT NOT NULL DEFAULT 'manual',   -- 'auto' | 'manual'
-  error        TEXT
+  id               INTEGER PRIMARY KEY,
+  signal_id        INTEGER,
+  src_ip           TEXT NOT NULL,
+  ts_applied       INTEGER NOT NULL,
+  ts_expires       INTEGER,
+  ts_reverted      INTEGER,
+  status           TEXT NOT NULL DEFAULT 'active',   -- 'active' | 'reverted' | 'failed'
+  trigger_type     TEXT NOT NULL DEFAULT 'manual',   -- 'auto' | 'manual'
+  error            TEXT,
+  mechanism        TEXT NOT NULL DEFAULT 'ssh',      -- 'ssh' | 'flowspec'
+  flowspec_rule_id INTEGER,                          -- id em flowspec_rules (banco do FlowGuard)
+  match_json       TEXT,                             -- rule FlowSpec efetivamente anunciada
+  rate_limit_bps   INTEGER                           -- NULL quando a ação é discard
+);
+
+-- Baseline EWMA de tráfego por (cliente, classe de tráfego) — usada só pelo
+-- rate-limit dinâmico do FlowSpec (dns_tunneling/amplifier_hosted). traffic_class
+-- é 'dns_query' (consultas DNS saindo do cliente) ou 'amplifier:<porta>' (cliente
+-- respondendo como se fosse o serviço abusado numa porta de amplificação
+-- específica) — uma linha por combinação, nunca uma linha "global" por cliente.
+CREATE TABLE IF NOT EXISTS client_traffic_baseline (
+  src_ip        TEXT NOT NULL,
+  traffic_class TEXT NOT NULL,
+  bps_mean      REAL NOT NULL DEFAULT 0,
+  bps_var       REAL NOT NULL DEFAULT 0,
+  samples       INTEGER NOT NULL DEFAULT 0,
+  updated_at    INTEGER NOT NULL,
+  PRIMARY KEY (src_ip, traffic_class)
 );
 
 CREATE INDEX IF NOT EXISTS idx_client_flow_ts ON client_flow_aggs(ts);
@@ -90,6 +113,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for col in ("apply_commands", "apply_output", "revert_commands", "revert_output"):
         if col not in edge_cols:
             conn.execute(f"ALTER TABLE edge_mitigations ADD COLUMN {col} TEXT")
+    # colunas do mecanismo FlowSpec — bancos criados antes dele existir não têm
+    # essas colunas; linhas antigas (SSH) ficam com mechanism='ssh' via DEFAULT.
+    if "mechanism" not in edge_cols:
+        conn.execute("ALTER TABLE edge_mitigations ADD COLUMN mechanism TEXT NOT NULL DEFAULT 'ssh'")
+    if "flowspec_rule_id" not in edge_cols:
+        conn.execute("ALTER TABLE edge_mitigations ADD COLUMN flowspec_rule_id INTEGER")
+    if "match_json" not in edge_cols:
+        conn.execute("ALTER TABLE edge_mitigations ADD COLUMN match_json TEXT")
+    if "rate_limit_bps" not in edge_cols:
+        conn.execute("ALTER TABLE edge_mitigations ADD COLUMN rate_limit_bps INTEGER")
     conn.commit()
 
 
@@ -244,6 +277,19 @@ def list_suspicious_clients(conn: sqlite3.Connection, resolved: bool = False, si
     return [dict(r) for r in rows]
 
 
+def recent_signal_src_ips(conn: sqlite3.Connection, signal_type: str, since_ts: int) -> set[str]:
+    """src_ip flagrados por signal_type neste ciclo (novo ou recorrente — touch_signal
+    e insert_suspicious_client sempre atualizam ts_last_seen pro momento em que o
+    detector rodou). Usado pra anti-poisoning da baseline de tráfego: exclui do EWMA
+    qualquer cliente que o próprio detector já classificou como anômalo agora, senão a
+    baseline aprende o ataque como tráfego normal."""
+    rows = conn.execute(
+        "SELECT DISTINCT src_ip FROM suspicious_clients WHERE signal_type = ? AND ts_last_seen >= ?",
+        (signal_type, since_ts),
+    ).fetchall()
+    return {r["src_ip"] for r in rows}
+
+
 def resolve_signal(conn: sqlite3.Connection, signal_id: int) -> bool:
     cur = conn.execute(
         "UPDATE suspicious_clients SET resolved = 1 WHERE id = ? AND resolved = 0", (signal_id,),
@@ -327,15 +373,19 @@ def client_usage_timeseries(conn: sqlite3.Connection, src_ip: str, window_s: int
 def insert_edge_mitigation(conn: sqlite3.Connection, src_ip: str, signal_id: int | None,
                             ttl_s: int | None, trigger_type: str,
                             apply_commands: list[str] | None = None, apply_output: str | None = None,
-                            status: str = "active", error: str | None = None) -> int:
+                            status: str = "active", error: str | None = None,
+                            mechanism: str = "ssh", flowspec_rule_id: int | None = None,
+                            match_json: str | None = None, rate_limit_bps: int | None = None) -> int:
     now = int(time.time())
     ts_expires = now + ttl_s if ttl_s else None
     cur = conn.execute(
         """INSERT INTO edge_mitigations
-           (signal_id, src_ip, ts_applied, ts_expires, status, trigger_type, apply_commands, apply_output, error)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (signal_id, src_ip, ts_applied, ts_expires, status, trigger_type, apply_commands, apply_output, error,
+            mechanism, flowspec_rule_id, match_json, rate_limit_bps)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (signal_id, src_ip, now, ts_expires, status, trigger_type,
-         json.dumps(apply_commands) if apply_commands else None, apply_output, error),
+         json.dumps(apply_commands) if apply_commands else None, apply_output, error,
+         mechanism, flowspec_rule_id, match_json, rate_limit_bps),
     )
     conn.commit()
     return cur.lastrowid
@@ -369,12 +419,26 @@ def list_edge_mitigations(conn: sqlite3.Connection, active_only: bool = False) -
     return [dict(r) for r in rows]
 
 
-def list_due_edge_mitigations(conn: sqlite3.Connection) -> list[dict]:
+def count_active_edge_mitigations(conn: sqlite3.Connection, mechanism: str) -> int:
+    """Orçamento próprio do ClientGuard (max_active_rules em flowspec_mitigation.yaml) —
+    contagem local, não depende de listar regras no FlowGuard (que não filtra por
+    origin — ver flowspec_mitigation.py)."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM edge_mitigations WHERE status = 'active' AND mechanism = ?", (mechanism,),
+    ).fetchone()[0]
+
+
+def list_due_edge_mitigations(conn: sqlite3.Connection, mechanism: str | None = None) -> list[dict]:
+    """mechanism opcional restringe a expiração a um caminho só ('ssh' ou 'flowspec') —
+    os dois módulos de mitigação rodam expire_due independentemente, cada um só
+    processando o próprio mecanismo (ver flowspec_mitigation.py e edge_mitigation.py)."""
     now = int(time.time())
-    rows = conn.execute(
-        "SELECT * FROM edge_mitigations WHERE status = 'active' AND ts_expires IS NOT NULL AND ts_expires <= ?",
-        (now,),
-    ).fetchall()
+    query = "SELECT * FROM edge_mitigations WHERE status = 'active' AND ts_expires IS NOT NULL AND ts_expires <= ?"
+    params: tuple = (now,)
+    if mechanism:
+        query += " AND mechanism = ?"
+        params += (mechanism,)
+    rows = conn.execute(query, params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -401,3 +465,75 @@ def client_top_destinations(conn: sqlite3.Connection, src_ip: str, window_s: int
         (src_ip, since, limit),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# --- baseline de tráfego por cliente (pro rate-limit dinâmico do FlowSpec) -----
+#
+# Mesmo formato EWMA de collector/storage.py (FlowGuard) — prefix_baseline/
+# update_baselines/get_baseline —, mas com duas adaptações exigidas pela escala
+# (milhares de clientes em vez de 8 prefixos fixos): get_baselines_for busca só
+# as chaves ativas no ciclo atual (nunca a tabela inteira, ao contrário do
+# list_baselines do FlowGuard), e update_traffic_baselines grava em lote via
+# executemany depois de um único SELECT em massa, em vez de 1 SELECT + 1
+# UPDATE/INSERT por linha num loop Python.
+
+def get_baselines_for(conn: sqlite3.Connection, src_ips: list[str]) -> dict[tuple[str, str], dict]:
+    """Baselines de todas as traffic_class para os src_ips informados — chamar só
+    com os IPs que tiveram tráfego relevante no ciclo atual, nunca com a lista
+    inteira de clientes cadastrados."""
+    if not src_ips:
+        return {}
+    placeholders = ",".join("?" * len(src_ips))
+    rows = conn.execute(
+        f"SELECT * FROM client_traffic_baseline WHERE src_ip IN ({placeholders})", src_ips,
+    ).fetchall()
+    return {(r["src_ip"], r["traffic_class"]): dict(r) for r in rows}
+
+
+def get_baseline_for(conn: sqlite3.Connection, src_ip: str, traffic_class: str) -> dict | None:
+    """Lookup pontual — usado por flowspec_mitigation.build_rule no momento de montar
+    a regra (1 cliente por vez), diferente de get_baselines_for (usado em lote pela
+    atualização por ciclo)."""
+    row = conn.execute(
+        "SELECT * FROM client_traffic_baseline WHERE src_ip = ? AND traffic_class = ?",
+        (src_ip, traffic_class),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def update_traffic_baselines(conn: sqlite3.Connection, updates: list[tuple]) -> None:
+    """updates: lista de (src_ip, traffic_class, bps, alpha, now, prev_row_or_None).
+    prev_row vem de get_baselines_for, buscado uma vez em lote pelo chamador — evita
+    1 SELECT por linha aqui. Mesma matemática EWMA do FlowGuard: mean += α(x-mean),
+    var = (1-α)(var + α(x-mean)²). Chamador já deve ter excluído daqui qualquer
+    (src_ip, traffic_class) que gerou sinal neste ciclo (anti-poisoning — senão a
+    baseline aprende o próprio ataque como normal)."""
+    if not updates:
+        return
+    rows = []
+    for src_ip, traffic_class, bps, alpha, now, prev in updates:
+        if prev is None:
+            rows.append((src_ip, traffic_class, bps, 0.0, 1, now))
+            continue
+        new_mean = prev["bps_mean"] + alpha * (bps - prev["bps_mean"])
+        new_var = (1 - alpha) * (prev["bps_var"] + alpha * (bps - prev["bps_mean"]) ** 2)
+        rows.append((src_ip, traffic_class, new_mean, new_var, prev["samples"] + 1, now))
+    conn.executemany(
+        """INSERT INTO client_traffic_baseline (src_ip, traffic_class, bps_mean, bps_var, samples, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(src_ip, traffic_class) DO UPDATE SET
+             bps_mean = excluded.bps_mean, bps_var = excluded.bps_var,
+             samples = excluded.samples, updated_at = excluded.updated_at""",
+        rows,
+    )
+    conn.commit()
+
+
+def prune_stale_baselines(conn: sqlite3.Connection, stale_days: int) -> int:
+    """Remove baselines de (cliente, classe) sem atualização há stale_days — cliente
+    que sumiu/trocou de IP via DHCP. O FlowGuard não precisa disso (8 prefixos fixos,
+    nunca somem); o ClientGuard precisa, ou a tabela cresce sem limite."""
+    cutoff = int(time.time()) - stale_days * 86400
+    cur = conn.execute("DELETE FROM client_traffic_baseline WHERE updated_at < ?", (cutoff,))
+    conn.commit()
+    return cur.rowcount

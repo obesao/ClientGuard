@@ -414,3 +414,66 @@ def test_run_all_disabling_ai_explanations_passes_none_as_ai_client(conn):
     detector.run_all(conn, _base_config(), whitelist=set(), ai_client=FakeAI(), toggles=toggles)
     assert "port_scan_horizontal" in signal_types(conn)
     assert not calls  # sinal disparou normalmente, mas sem chamar a IA
+
+
+# --- gatilho de mitigação via FlowSpec (mitigation_match) --------------------
+
+def _mitigation_cfg():
+    return {"auto_mitigate": {
+        "port_scan_horizontal": "discard", "dns_tunneling": "rate_limit",
+        "amplifier_hosted": "rate_limit", "malicious_contact": "off",
+    }}
+
+
+def test_dns_tunneling_triggers_mitigation_with_udp_53_match(conn, monkeypatch):
+    calls = []
+    monkeypatch.setattr("flowspec_mitigation.trigger_async", lambda *a, **k: calls.append((a, k)))
+    insert_flow(conn, "177.86.19.93", "203.0.113.53", 53, protocol=17, packets_=10)
+    cfg = _base_config()
+    cfg["detection"]["dns_tunneling_min_queries"] = 5
+    detector.detect_dns_tunneling(conn, WINDOW_S, 5, whitelist=set(),
+                                   mitigation_ctx={"cfg": _mitigation_cfg(), "fg_socket_path": "/fake.sock"})
+    assert len(calls) == 1
+    args, _ = calls[0]
+    # (conn, db_lock, src_ip, signal_id, signal_type, mitigation_match, cfg, fg_socket_path, min_samples)
+    assert args[2] == "177.86.19.93"
+    assert args[4] == "dns_tunneling"
+    assert args[5] == {"protocol": "udp", "dst_port": "53"}
+
+
+def test_amplifier_triggers_mitigation_with_src_port_match(conn, monkeypatch):
+    calls = []
+    monkeypatch.setattr("flowspec_mitigation.trigger_async", lambda *a, **k: calls.append((a, k)))
+    insert_flow(conn, "177.86.19.94", "198.51.100.1", 33000, protocol=17, bytes_=10_000_000, src_port=53)
+    insert_flow(conn, "177.86.19.94", "198.51.100.2", 33001, protocol=17, bytes_=10_000_000, src_port=53)
+    detector.detect_amplifier(conn, WINDOW_S, ports=[53], min_bps=1, whitelist=set(),
+                               mitigation_ctx={"cfg": _mitigation_cfg(), "fg_socket_path": "/fake.sock"})
+    assert len(calls) == 1
+    args, _ = calls[0]
+    assert args[4] == "amplifier_hosted"
+    assert args[5] == {"protocol": "udp", "src_port": "53"}
+
+
+def test_scan_horizontal_triggers_mitigation_with_no_match(conn, monkeypatch):
+    calls = []
+    monkeypatch.setattr("flowspec_mitigation.trigger_async", lambda *a, **k: calls.append((a, k)))
+    for i in range(5):
+        insert_flow(conn, "177.86.19.95", f"45.10.{i}.1", 22, protocol=6)
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=5, whitelist=set(),
+                                     mitigation_ctx={"cfg": _mitigation_cfg(), "fg_socket_path": "/fake.sock"})
+    assert len(calls) == 1
+    args, _ = calls[0]
+    assert args[4] == "port_scan_horizontal"
+    assert args[5] is None
+
+
+def test_off_action_does_not_call_trigger_async(conn, monkeypatch):
+    calls = []
+    monkeypatch.setattr("flowspec_mitigation.trigger_async", lambda *a, **k: calls.append((a, k)))
+    feed = threat_feed.ThreatFeed(":memory-nao-existe:")
+    feed._single_ips = {"198.51.100.99"}
+    insert_flow(conn, "177.86.19.96", "198.51.100.99", 443, protocol=6)
+    detector.detect_malicious_contact(conn, WINDOW_S, feed, whitelist=set(),
+                                       mitigation_ctx={"cfg": _mitigation_cfg(), "fg_socket_path": "/fake.sock"})
+    assert "malicious_contact" in signal_types(conn)
+    assert not calls

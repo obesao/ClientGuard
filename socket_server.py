@@ -19,6 +19,7 @@ from pathlib import Path
 import configio
 import control
 import edge_mitigation
+import flowspec_mitigation
 import storage
 
 LOG = logging.getLogger("clientguard.socket")
@@ -52,6 +53,8 @@ _TOGGLES_LOCK = threading.Lock()
 
 # Mesmo motivo do _TOGGLES_LOCK, mas pro read-modify-write de edge_mitigation.yaml.
 _EDGE_CFG_LOCK = threading.Lock()
+# idem, pro read-modify-write de flowspec_mitigation.yaml.
+_FLOWSPEC_MITIGATION_CFG_LOCK = threading.Lock()
 
 WHITELIST_HEADER = (
     "# whitelist.yaml — src_ip/prefixos que NUNCA devem gerar alerta no ClientGuard\n"
@@ -384,6 +387,35 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         try:
             with _EDGE_CFG_LOCK:
                 updated = edge_mitigation.save_auto_mitigate(
+                    changes, int(default_ttl_s) if default_ttl_s else None, path,
+                )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        d.reload_config()
+        return {"ok": True, "config": {
+            "auto_mitigate": updated.get("auto_mitigate", {}), "default_ttl_s": updated.get("default_ttl_s"),
+        }}
+
+    # --- mitigação via BGP FlowSpec (substitui edge_apply/edge_set_auto pra gatilho
+    # automático — edge_mitigation/SSH acima fica só pra reverter mitigações legadas) --
+
+    def _cmd_flowspec_mitigation_config(self, request: dict) -> dict:
+        cfg = self.daemon_ref.flowspec_mitigation_cfg
+        return {"ok": True, "config": {
+            "default_ttl_s": cfg.get("default_ttl_s"), "max_active_rules": cfg.get("max_active_rules"),
+            "auto_mitigate": cfg.get("auto_mitigate", {}),
+        }}
+
+    def _cmd_flowspec_mitigation_set_auto(self, request: dict) -> dict:
+        changes = request.get("auto_mitigate")
+        if not isinstance(changes, dict) or not changes:
+            return {"ok": False, "error": "auto_mitigate (objeto não vazio) obrigatório"}
+        d = self.daemon_ref
+        path = d.config.get("flowspec_mitigation_file", flowspec_mitigation.DEFAULT_CONFIG_PATH)
+        default_ttl_s = request.get("default_ttl_s")
+        try:
+            with _FLOWSPEC_MITIGATION_CFG_LOCK:
+                updated = flowspec_mitigation.save_auto_mitigate(
                     changes, int(default_ttl_s) if default_ttl_s else None, path,
                 )
         except ValueError as exc:
