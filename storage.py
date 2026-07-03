@@ -3,6 +3,7 @@ independentes do FlowGuard (banco separado, /root/clientguard/db/)."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -80,6 +81,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "src_port" not in cols:
         conn.execute("ALTER TABLE client_flow_aggs ADD COLUMN src_port INTEGER NOT NULL DEFAULT 0")
         conn.commit()
+
+    # pra dar detalhe de "o que exatamente foi mandado pro equipamento" no botão
+    # Detalhes do portal — comandos resolvidos (JSON) + saída bruta do Netmiko,
+    # separados por etapa (aplicar/reverter) porque uma mitigação pode reverter
+    # bem depois de aplicada, e queremos as duas saídas guardadas.
+    edge_cols = {row["name"] for row in conn.execute("PRAGMA table_info(edge_mitigations)")}
+    for col in ("apply_commands", "apply_output", "revert_commands", "revert_output"):
+        if col not in edge_cols:
+            conn.execute(f"ALTER TABLE edge_mitigations ADD COLUMN {col} TEXT")
+    conn.commit()
 
 
 def connect(db_path: str, check_same_thread: bool = True) -> sqlite3.Connection:
@@ -314,13 +325,17 @@ def client_usage_timeseries(conn: sqlite3.Connection, src_ip: str, window_s: int
 # --- mitigação direta na borda (SSH/ACL) ----------------------------------
 
 def insert_edge_mitigation(conn: sqlite3.Connection, src_ip: str, signal_id: int | None,
-                            ttl_s: int | None, trigger_type: str) -> int:
+                            ttl_s: int | None, trigger_type: str,
+                            apply_commands: list[str] | None = None, apply_output: str | None = None,
+                            status: str = "active", error: str | None = None) -> int:
     now = int(time.time())
     ts_expires = now + ttl_s if ttl_s else None
     cur = conn.execute(
-        """INSERT INTO edge_mitigations (signal_id, src_ip, ts_applied, ts_expires, status, trigger_type)
-           VALUES (?, ?, ?, ?, 'active', ?)""",
-        (signal_id, src_ip, now, ts_expires, trigger_type),
+        """INSERT INTO edge_mitigations
+           (signal_id, src_ip, ts_applied, ts_expires, status, trigger_type, apply_commands, apply_output, error)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (signal_id, src_ip, now, ts_expires, status, trigger_type,
+         json.dumps(apply_commands) if apply_commands else None, apply_output, error),
     )
     conn.commit()
     return cur.lastrowid
@@ -363,10 +378,14 @@ def list_due_edge_mitigations(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def mark_edge_reverted(conn: sqlite3.Connection, mitigation_id: int, error: str | None = None) -> None:
+def mark_edge_reverted(conn: sqlite3.Connection, mitigation_id: int, error: str | None = None,
+                        revert_commands: list[str] | None = None, revert_output: str | None = None) -> None:
     conn.execute(
-        "UPDATE edge_mitigations SET status = ?, ts_reverted = ?, error = ? WHERE id = ?",
-        ("failed" if error else "reverted", int(time.time()), error, mitigation_id),
+        """UPDATE edge_mitigations
+           SET status = ?, ts_reverted = ?, error = ?, revert_commands = ?, revert_output = ?
+           WHERE id = ?""",
+        ("failed" if error else "reverted", int(time.time()), error,
+         json.dumps(revert_commands) if revert_commands else None, revert_output, mitigation_id),
     )
     conn.commit()
 

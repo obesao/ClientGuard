@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.15.0**
+**Versão atual: v1.16.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,25 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.16.0 — 2026-07-02 — Detalhe de mitigação de borda + falha passa a ficar registrada
+- `edge_mitigations` ganhou 4 colunas (`apply_commands`, `apply_output`,
+  `revert_commands`, `revert_output`) — os comandos VRP exatos resolvidos
+  (com o IP já substituído) e a saída bruta do equipamento, tanto pra
+  aplicar quanto pra reverter. Botão "Detalhes" novo na aba Regras
+  (ClientGuard → Mitigação direta na borda) mostra tudo isso.
+- **Mudança de comportamento importante**: antes, uma tentativa de aplicar
+  que FALHASSE não deixava rastro nenhum além do audit log em disco
+  (`logs/edge-audit.jsonl`) — `apply_and_record` só gravava em
+  `edge_mitigations` quando dava certo. Agora grava sempre, com
+  `status='failed'` quando falha, erro incluído — resolve exatamente o
+  cenário "apliquei e não apareceu em lugar nenhum" (era um bug de driver
+  Netmiko, ver v1.15.0, mas o sintoma "não aparece" também era esse: falha
+  nunca virava visível na UI).
+- `clientguard-cli edge apply/revert` ganhou timeout de 25s (era 6s, curto
+  demais pra uma conexão SSH de verdade — mesmo timeout que o CGI do portal
+  já usava pra essa ação).
+- 3 testes novos (134 no total).
 
 ### v1.15.0 — 2026-07-02 — Corrige driver Netmiko: mitigação de borda não estava aplicando de verdade
 - **Bug real** (mesma causa raiz documentada no CHANGELOG do `flowguard`):

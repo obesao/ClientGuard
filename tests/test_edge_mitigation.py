@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -163,6 +164,19 @@ def test_apply_and_record_inserts_row_and_calls_ssh(conn, tmp_path):
     assert row["trigger_type"] == "manual"
 
 
+def test_apply_and_record_persists_resolved_commands_and_output(conn, tmp_path):
+    flowguard_path = _write_warmode_yaml(tmp_path)
+    cfg = _cfg()
+    fake_conn = MagicMock()
+    fake_conn.send_config_set.return_value = "device output here"
+    with patch("netmiko.ConnectHandler", return_value=fake_conn):
+        edge_mitigation.apply_and_record(conn, None, "1.2.3.4", None, 3600, "manual", cfg, flowguard_path)
+    row = storage.get_active_edge_mitigation(conn, "1.2.3.4")
+    commands = json.loads(row["apply_commands"])
+    assert commands == ["acl number 3999", "rule deny ip source 1.2.3.4 0"]
+    assert row["apply_output"] == "device output here"
+
+
 def test_apply_and_record_idempotent_extends_ttl_without_reapplying(conn, tmp_path):
     flowguard_path = _write_warmode_yaml(tmp_path)
     cfg = _cfg()
@@ -176,12 +190,28 @@ def test_apply_and_record_idempotent_extends_ttl_without_reapplying(conn, tmp_pa
     mock_handler.assert_called_once()  # segunda chamada NÃO conecta de novo
 
 
-def test_apply_and_record_failure_does_not_insert_row(conn, tmp_path):
+def test_apply_and_record_failure_does_not_count_as_active(conn, tmp_path):
     flowguard_path = _write_warmode_yaml(tmp_path, device_name="Outro")
     cfg = _cfg()
     result = edge_mitigation.apply_and_record(conn, None, "1.2.3.4", None, 3600, "manual", cfg, flowguard_path)
     assert result["ok"] is False
     assert storage.get_active_edge_mitigation(conn, "1.2.3.4") is None
+
+
+def test_apply_and_record_failure_still_records_a_row_for_troubleshooting(conn, tmp_path):
+    # achado real: antes disso, uma falha na aplicação (ex: erro de driver
+    # Netmiko) não deixava rastro nenhum na UI — só no audit log em disco. O
+    # operador via "não apareceu em lugar nenhum" sem saber que tinha
+    # tentado e falhado. Agora sempre grava, com status='failed'.
+    flowguard_path = _write_warmode_yaml(tmp_path, device_name="Outro")
+    cfg = _cfg()
+    result = edge_mitigation.apply_and_record(conn, None, "1.2.3.4", None, 3600, "manual", cfg, flowguard_path)
+    rows = storage.list_edge_mitigations(conn)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["id"] == result["id"]
+    assert "não encontrado" in rows[0]["error"]
+    assert json.loads(rows[0]["apply_commands"]) == ["acl number 3999", "rule deny ip source 1.2.3.4 0"]
 
 
 def test_revert_and_record_marks_reverted(conn, tmp_path):
@@ -195,6 +225,20 @@ def test_revert_and_record_marks_reverted(conn, tmp_path):
     assert result["ok"] is True
     row = storage.get_edge_mitigation(conn, mitigation_id)
     assert row["status"] == "reverted"
+
+
+def test_revert_and_record_persists_resolved_commands_and_output(conn, tmp_path):
+    flowguard_path = _write_warmode_yaml(tmp_path)
+    cfg = _cfg()
+    mitigation_id = storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "manual")
+    fake_conn = MagicMock()
+    fake_conn.send_config_set.return_value = "revert output here"
+    with patch("netmiko.ConnectHandler", return_value=fake_conn):
+        edge_mitigation.revert_and_record(conn, None, mitigation_id, cfg, flowguard_path)
+    row = storage.get_edge_mitigation(conn, mitigation_id)
+    commands = json.loads(row["revert_commands"])
+    assert commands == ["acl number 3999", "undo rule deny ip source 1.2.3.4 0"]
+    assert row["revert_output"] == "revert output here"
 
 
 def test_revert_and_record_unknown_id(conn, tmp_path):

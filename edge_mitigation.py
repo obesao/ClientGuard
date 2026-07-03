@@ -113,13 +113,16 @@ def _run_commands(ip: str, cfg: dict, flowguard_path: str, templates: list[str],
     from netmiko import ConnectHandler
     from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutException
 
+    # resolvido ANTES de qualquer coisa que possa falhar — o botão Detalhes do
+    # portal mostra isso mesmo quando a aplicação falhou (ex: equipamento não
+    # encontrado), pra sempre dar pra ver o que SERIA mandado.
+    commands = [tpl.format(ip=ip, acl_number=cfg["acl_number"]) for tpl in templates]
     t0 = time.monotonic()
     try:
         device = _load_warmode_device(cfg, flowguard_path)
     except RuntimeError as exc:
-        return {"ok": False, "error": str(exc), "output": "", "elapsed_s": 0.0}
+        return {"ok": False, "error": str(exc), "output": "", "elapsed_s": 0.0, "commands": commands}
 
-    commands = [tpl.format(ip=ip, acl_number=cfg["acl_number"]) for tpl in templates]
     conn = None
     try:
         conn = ConnectHandler(
@@ -131,15 +134,15 @@ def _run_commands(ip: str, cfg: dict, flowguard_path: str, templates: list[str],
         if device.get("enable_mode"):
             conn.enable()
         output = conn.send_config_set(commands, read_timeout=timeout)
-        return {"ok": True, "output": output, "elapsed_s": round(time.monotonic() - t0, 1)}
+        return {"ok": True, "output": output, "elapsed_s": round(time.monotonic() - t0, 1), "commands": commands}
     except NetmikoAuthenticationException:
         return {"ok": False, "error": "autenticação SSH falhou (usuário/senha)", "output": "",
-                "elapsed_s": round(time.monotonic() - t0, 1)}
+                "elapsed_s": round(time.monotonic() - t0, 1), "commands": commands}
     except NetmikoTimeoutException:
         return {"ok": False, "error": "timeout de conexão SSH", "output": "",
-                "elapsed_s": round(time.monotonic() - t0, 1)}
+                "elapsed_s": round(time.monotonic() - t0, 1), "commands": commands}
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "output": "", "elapsed_s": round(time.monotonic() - t0, 1)}
+        return {"ok": False, "error": str(exc), "output": "", "elapsed_s": round(time.monotonic() - t0, 1), "commands": commands}
     finally:
         if conn is not None:
             try:
@@ -188,10 +191,15 @@ def apply_and_record(conn: sqlite3.Connection, db_lock, src_ip: str, signal_id: 
         return {"ok": True, "id": existing["id"], "already_active": True}
 
     result = apply_block(src_ip, cfg, flowguard_path)
-    if not result["ok"]:
-        return {"ok": False, "error": result.get("error", "falha desconhecida ao aplicar mitigação")}
     with lock:
-        mitigation_id = storage.insert_edge_mitigation(conn, src_ip, signal_id, ttl_s, trigger_type)
+        mitigation_id = storage.insert_edge_mitigation(
+            conn, src_ip, signal_id, ttl_s, trigger_type,
+            apply_commands=result.get("commands"), apply_output=result.get("output"),
+            status="active" if result["ok"] else "failed",
+            error=None if result["ok"] else result.get("error"),
+        )
+    if not result["ok"]:
+        return {"ok": False, "error": result.get("error", "falha desconhecida ao aplicar mitigação"), "id": mitigation_id}
     return {"ok": True, "id": mitigation_id}
 
 
@@ -204,7 +212,10 @@ def revert_and_record(conn: sqlite3.Connection, db_lock, mitigation_id: int,
         return {"ok": False, "error": "mitigação não encontrada"}
     result = revert_block(row["src_ip"], cfg, flowguard_path)
     with lock:
-        storage.mark_edge_reverted(conn, mitigation_id, error=None if result["ok"] else result.get("error"))
+        storage.mark_edge_reverted(
+            conn, mitigation_id, error=None if result["ok"] else result.get("error"),
+            revert_commands=result.get("commands"), revert_output=result.get("output"),
+        )
     return result
 
 

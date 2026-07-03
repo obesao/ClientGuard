@@ -271,7 +271,10 @@ def cmd_block_list(args: argparse.Namespace, sock_path: str) -> None:
 
 
 def cmd_edge_apply(args: argparse.Namespace, sock_path: str) -> None:
-    resp = send_command(sock_path, {"cmd": "edge_apply", "ip": args.ip, "ttl_s": args.ttl_s})
+    # timeout maior que o default (6s) — isso conecta via SSH de verdade e roda
+    # send_config_set num equipamento real, pode levar bem mais que 6s (mesmo
+    # timeout já usado pelo CGI do portal pra essa mesma ação)
+    resp = send_command(sock_path, {"cmd": "edge_apply", "ip": args.ip, "ttl_s": args.ttl_s}, timeout=25.0)
     if resp.get("ok") and resp.get("already_active"):
         _print_simple(resp, ok_message=f"{args.ip} já tinha mitigação ativa (TTL renovado)")
     else:
@@ -279,7 +282,7 @@ def cmd_edge_apply(args: argparse.Namespace, sock_path: str) -> None:
 
 
 def cmd_edge_revert(args: argparse.Namespace, sock_path: str) -> None:
-    resp = send_command(sock_path, {"cmd": "edge_revert", "id": args.id})
+    resp = send_command(sock_path, {"cmd": "edge_revert", "id": args.id}, timeout=25.0)
     _print_simple(resp, ok_message=f"mitigação {args.id} revertida")
 
 
