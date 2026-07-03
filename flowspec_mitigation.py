@@ -223,34 +223,61 @@ def _bypass_rule_clause(rule: dict, rule_id: int) -> str:
     return " ".join(parts)
 
 
-def _pbr_bypass_ssh(commands_tail: list[str], bypass_cfg: dict, flowguard_path: str) -> dict:
+# Serializa TODO acesso SSH à caixa PPPoE a partir daqui — achado real de revisão:
+# duas mitigações disparando no mesmo ciclo (threads independentes via trigger_async)
+# abriam duas sessões SSH concorrentes e faziam `commit` ao mesmo tempo no mesmo
+# equipamento; no modelo de candidate-config do VRP V8 isso é uma condição de corrida
+# real (um commit pode colidir com uma edição pela metade da outra sessão). Único lock
+# global é aceitável aqui: só existe UM equipamento/ACL sendo tocado por este módulo,
+# e cada push/remove já é uma chamada síncrona de poucos segundos.
+_PBR_BYPASS_LOCK = threading.Lock()
+
+
+def _pbr_bypass_ssh(action: str, rule_src_ip: str, commands_tail: list[str], bypass_cfg: dict,
+                     flowguard_path: str) -> dict:
     """Reaproveita edge_mitigation._run_commands (conexão/erro já tratados lá) —
     só monta o device_cfg no formato que aquela função espera e não usa o
-    placeholder {ip} (o clause já vem pronto, com tudo embutido)."""
+    placeholder {ip} (o clause já vem pronto, com tudo embutido). Serializado pelo
+    lock acima, e auditado no MESMO log (edge-audit.jsonl) que qualquer outra ação
+    SSH do sistema — achado real: chamar _run_commands direto (sem passar por
+    apply_block/revert_block) deixava essas ações invisíveis na única trilha de
+    auditoria SSH que o sistema já tinha."""
     device_cfg = {"warmode_device": bypass_cfg["warmode_device"], "acl_number": bypass_cfg["acl_number"]}
     templates = ["acl number {acl_number}", *commands_tail, "quit", "commit"]
-    return edge_mitigation._run_commands("", device_cfg, flowguard_path, templates, timeout=25.0)
+    # timeout menor que o da CGI do portal (25s) — margem pra CGI não estourar
+    # timeout bem na hora em que o SSH estaria terminando com sucesso.
+    with _PBR_BYPASS_LOCK:
+        result = edge_mitigation._run_commands("", device_cfg, flowguard_path, templates, timeout=20.0)
+    edge_mitigation._audit(f"pbr_bypass_{action}", rule_src_ip, result)
+    return result
 
 
 def push_pbr_bypass(rule: dict, flowspec_rule_id: int, cfg: dict, flowguard_path: str) -> dict:
     bypass_cfg = cfg.get("pbr_bypass") or {}
     if not bypass_cfg.get("enabled"):
         return {"ok": True, "skipped": "pbr_bypass_disabled"}
+    # só faz sentido pra discard: pra rate_limit o tráfego é pra continuar existindo
+    # (só mais devagar), e tirá-lo do redirecionamento pro A10 tira a tradução NAT do
+    # IP CGNAT (100.64.0.0/10, não roteável na internet pública) — o fluxo perderia
+    # conectividade por completo em vez de só ser limitado, violando a exigência do
+    # usuário de que o cliente continue navegando.
+    if _action_kind(rule["action"]) != "discard":
+        return {"ok": True, "skipped": "pbr_bypass_only_for_discard"}
     rule_id = bypass_cfg["rule_id_base"] + flowspec_rule_id
     clause = _bypass_rule_clause(rule, rule_id)
-    result = _pbr_bypass_ssh([clause], bypass_cfg, flowguard_path)
+    result = _pbr_bypass_ssh("apply", rule.get("src_prefix", ""), [clause], bypass_cfg, flowguard_path)
     if not result.get("ok"):
         LOG.error("falha ao empurrar exceção de PBR (ACL %s regra %s) pra %s: %s",
                    bypass_cfg["acl_number"], rule_id, bypass_cfg["warmode_device"], result.get("error"))
     return result
 
 
-def remove_pbr_bypass(flowspec_rule_id: int, cfg: dict, flowguard_path: str) -> dict:
+def remove_pbr_bypass(flowspec_rule_id: int, src_ip: str, cfg: dict, flowguard_path: str) -> dict:
     bypass_cfg = cfg.get("pbr_bypass") or {}
     if not bypass_cfg.get("enabled"):
         return {"ok": True, "skipped": "pbr_bypass_disabled"}
     rule_id = bypass_cfg["rule_id_base"] + flowspec_rule_id
-    result = _pbr_bypass_ssh([f"undo rule {rule_id}"], bypass_cfg, flowguard_path)
+    result = _pbr_bypass_ssh("remove", src_ip, [f"undo rule {rule_id}"], bypass_cfg, flowguard_path)
     if not result.get("ok"):
         LOG.error("falha ao remover exceção de PBR (ACL %s regra %s) de %s: %s",
                    bypass_cfg["acl_number"], rule_id, bypass_cfg["warmode_device"], result.get("error"))
@@ -296,17 +323,41 @@ def apply_and_record(conn: sqlite3.Connection, db_lock, src_ip: str, signal_id: 
         "cmd": "flowspec_add", "rule": rule, "ttl_s": ttl_s, "origin": "clientguard", "peer": "pppoe",
     })
     rate_limit_bps = int(rule["action"].split(":", 1)[1]) if rule["action"].startswith("rate-limit:") else None
+
+    # Achado real de revisão: o resultado de push_pbr_bypass era descartado — se o
+    # FlowSpec fosse anunciado mas o SSH da exceção de PBR falhasse, a mitigação
+    # ainda assim ficava gravada/retornada como "active", recriando (numa camada
+    # mais funda) o exato bug que esta versão existe pra corrigir. Agora o status
+    # gravado reflete os dois passos: só é "active" de verdade se ambos deram certo.
+    bypass_error = None
+    if resp.get("ok"):
+        rule_id = resp.get("rule_id")
+        if rule_id is None:
+            # nunca deveria acontecer (contrato de BgpManager.flowspec_add é sempre
+            # devolver rule_id quando ok=True) — defensivo pra não estourar KeyError
+            # nem seguir sem saber qual rule_id casar na exceção de PBR.
+            bypass_error = "flowspec_add retornou ok sem rule_id"
+        else:
+            bypass_result = push_pbr_bypass(rule, rule_id, cfg, flowguard_path)
+            if not bypass_result.get("ok"):
+                bypass_error = bypass_result.get("error", "falha desconhecida ao aplicar exceção de PBR")
+
+    if not resp.get("ok"):
+        status, error = "failed", resp.get("error", "falha desconhecida ao anunciar FlowSpec")
+    elif bypass_error:
+        status, error = "failed", f"FlowSpec anunciado mas exceção de PBR falhou: {bypass_error}"
+    else:
+        status, error = "active", None
+
     with lock:
         mitigation_id = storage.insert_edge_mitigation(
             conn, src_ip, signal_id, ttl_s, trigger_type,
-            status="active" if resp.get("ok") else "failed",
-            error=None if resp.get("ok") else resp.get("error"),
+            status=status, error=error,
             mechanism="flowspec", flowspec_rule_id=resp.get("rule_id"),
             match_json=json.dumps(rule), rate_limit_bps=rate_limit_bps,
         )
-    if not resp.get("ok"):
-        return {"ok": False, "error": resp.get("error", "falha desconhecida ao anunciar FlowSpec"), "id": mitigation_id}
-    push_pbr_bypass(rule, resp["rule_id"], cfg, flowguard_path)
+    if status == "failed":
+        return {"ok": False, "error": error, "id": mitigation_id}
     return {"ok": True, "id": mitigation_id}
 
 
@@ -325,22 +376,62 @@ def revert_and_record(conn: sqlite3.Connection, db_lock, mitigation_id: int, fg_
         return {"ok": False, "error": "mitigação não encontrada"}
     resp = control.send_command(fg_socket_path, {"cmd": "flowspec_del", "rule_id": row["flowspec_rule_id"]})
     already_gone = not resp.get("ok") and "já está inativa" in (resp.get("error") or "")
+    truly_reverted = resp.get("ok") or already_gone
+
+    # Achado real de revisão: antes disso, a exceção de PBR era removida mesmo
+    # quando o flowspec_del falhava DE VERDADE (não só a corrida "já está
+    # inativa") — a regra FlowSpec continuava ativa protegendo, mas o bypass
+    # sumia, e o tráfego voltava a ser redirecionado pro A10 antes do FlowSpec
+    # (ainda ativo) ter qualquer chance de agir. Só remove o bypass quando o
+    # FlowSpec de fato saiu do ar — e o resultado da remoção agora é refletido
+    # no erro gravado, em vez de descartado silenciosamente.
+    bypass_error = None
+    if truly_reverted and cfg is not None and row.get("flowspec_rule_id") is not None:
+        bypass_result = remove_pbr_bypass(row["flowspec_rule_id"], row["src_ip"], cfg, flowguard_path)
+        if not bypass_result.get("ok") and not bypass_result.get("skipped"):
+            bypass_error = bypass_result.get("error", "falha desconhecida ao remover exceção de PBR")
+
+    if not truly_reverted:
+        final_error = resp.get("error")
+    elif bypass_error:
+        final_error = f"FlowSpec revertido mas exceção de PBR não foi removida: {bypass_error}"
+    else:
+        final_error = None
     with lock:
-        storage.mark_edge_reverted(conn, mitigation_id, error=None if (resp.get("ok") or already_gone) else resp.get("error"))
-    if cfg is not None and row.get("flowspec_rule_id") is not None:
-        remove_pbr_bypass(row["flowspec_rule_id"], cfg, flowguard_path)
-    return resp if resp.get("ok") else ({"ok": True, "already_inactive": True} if already_gone else resp)
+        storage.mark_edge_reverted(conn, mitigation_id, error=final_error)
+
+    if not truly_reverted:
+        return resp
+    if bypass_error:
+        return {"ok": False, "error": final_error, "flowspec_reverted": True}
+    return {"ok": True, "already_inactive": True} if already_gone else resp
 
 
 def expire_due(conn: sqlite3.Connection, db_lock, fg_socket_path: str, cfg: dict | None = None,
                 flowguard_path: str = "/root/flowguard") -> int:
     """Chamado periodicamente pelo loop do daemon — só processa mechanism='flowspec'
-    (mitigações SSH legadas expiram por conta do edge_mitigation.expire_due)."""
+    (mitigações SSH legadas expiram por conta do edge_mitigation.expire_due).
+
+    Achado real de revisão: revert_and_record agora pode envolver uma sessão SSH
+    síncrona (remove_pbr_bypass) de vários segundos — rodar isso serialmente na
+    MESMA thread que agrega NetFlow a cada ciclo arriscava atrasar (ou até
+    estourar a fila interna de captura) o próximo ciclo se várias mitigações
+    expirassem juntas. Cada reversão agora roda numa thread própria (mesmo padrão
+    fire-and-forget de trigger_async); a contagem retornada continua sendo
+    "quantas estavam due", só o trabalho de revert deixou de bloquear o chamador."""
     lock = db_lock or nullcontext()
     with lock:
         due = storage.list_due_edge_mitigations(conn, mechanism="flowspec")
     for row in due:
-        revert_and_record(conn, db_lock, row["id"], fg_socket_path, cfg, flowguard_path)
+        row_id = row["id"]
+
+        def _run(mitigation_id=row_id) -> None:
+            try:
+                revert_and_record(conn, db_lock, mitigation_id, fg_socket_path, cfg, flowguard_path)
+            except Exception:
+                LOG.exception("falha ao reverter mitigação FlowSpec expirada id=%s", mitigation_id)
+
+        threading.Thread(target=_run, daemon=True, name="clientguard-flowspec-expire").start()
     return len(due)
 
 

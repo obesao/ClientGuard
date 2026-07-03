@@ -87,6 +87,7 @@ def test_block_add_sends_flowspec_discard_rule(server):
     assert payload["rule"]["src_prefix"] == "1.2.3.4/32"
     assert payload["rule"]["action"] == "discard"
     assert payload["origin"] == "clientguard"  # aba Regras unificada do portal separa por aplicação
+    assert payload["peer"] == "pppoe"  # achado real: sem isso caía no peer 'main', que nunca vê o cliente
 
 
 def test_block_add_missing_ip(server):
@@ -99,12 +100,55 @@ def test_block_add_invalid_ip(server):
     assert resp["ok"] is False
 
 
+def test_block_add_pushes_pbr_bypass_when_enabled(server):
+    # achado real: o bloqueio manual nunca acionava a exceção de PBR — só a
+    # mitigação automática dos detectores era coberta.
+    server.daemon_ref.flowspec_mitigation_cfg["pbr_bypass"] = {
+        "enabled": True, "warmode_device": "NE8000 borda", "acl_number": 3001, "rule_id_base": 50000,
+    }
+    fake_conn = MagicMock()
+    fake_conn.send_config_set.return_value = "ok"
+    with patch("control.send_command", return_value={"ok": True, "rule_id": 7}), \
+         patch("netmiko.ConnectHandler", return_value=fake_conn) as mock_handler:
+        resp = server.dispatch({"cmd": "block_add", "ip": "1.2.3.4"})
+    assert resp["ok"] is True
+    mock_handler.assert_called_once()
+    sent = fake_conn.send_config_set.call_args[0][0]
+    assert sent == ["acl number 3001", "rule 50007 permit ip source 1.2.3.4 0", "quit", "commit"]
+
+
+def test_block_add_reports_pbr_bypass_failure(server):
+    server.daemon_ref.flowspec_mitigation_cfg["pbr_bypass"] = {
+        "enabled": True, "warmode_device": "NE8000 borda", "acl_number": 3001, "rule_id_base": 50000,
+    }
+    with patch("control.send_command", return_value={"ok": True, "rule_id": 7}), \
+         patch("netmiko.ConnectHandler", side_effect=OSError("conexão recusada")):
+        resp = server.dispatch({"cmd": "block_add", "ip": "1.2.3.4"})
+    assert resp["ok"] is True  # FlowSpec em si foi anunciado com sucesso
+    assert "pbr_bypass_error" in resp
+
+
 def test_block_del_sends_flowspec_del(server):
     with patch("control.send_command", return_value={"ok": True}) as mock_send:
         resp = server.dispatch({"cmd": "block_del", "id": 7})
     assert resp["ok"] is True
     _, payload = mock_send.call_args[0]
     assert payload == {"cmd": "flowspec_del", "rule_id": 7}
+
+
+def test_block_del_removes_pbr_bypass_when_enabled(server):
+    server.daemon_ref.flowspec_mitigation_cfg["pbr_bypass"] = {
+        "enabled": True, "warmode_device": "NE8000 borda", "acl_number": 3001, "rule_id_base": 50000,
+    }
+    fake_conn = MagicMock()
+    fake_conn.send_config_set.return_value = "ok"
+    with patch("control.send_command", return_value={"ok": True}), \
+         patch("netmiko.ConnectHandler", return_value=fake_conn) as mock_handler:
+        resp = server.dispatch({"cmd": "block_del", "id": 7})
+    assert resp["ok"] is True
+    mock_handler.assert_called_once()
+    sent = fake_conn.send_config_set.call_args[0][0]
+    assert sent == ["acl number 3001", "undo rule 50007", "quit", "commit"]
 
 
 def test_block_list_filters_out_rtbh(server):

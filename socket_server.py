@@ -312,18 +312,47 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         rule = {"src_prefix": prefix, "action": "discard", "label": "bloqueio manual via ClientGuard"}
         # origin permite a aba Regras unificada do portal separar por aplicação —
         # embora a regra "de verdade" viva no FlowGuard (única sessão BGP), ela foi
-        # pedida pelo ClientGuard.
-        payload = {"cmd": "flowspec_add", "rule": rule, "origin": "clientguard"}
+        # pedida pelo ClientGuard. peer="pppoe": achado real de revisão — sem isso
+        # caía no default 'main', que nunca vê o IP pré-NAT do cliente (mesmo bug
+        # que já tinha sido corrigido pro caminho automático em flowspec_mitigation.py,
+        # mas ficou pra trás aqui no bloqueio manual).
+        payload = {"cmd": "flowspec_add", "rule": rule, "origin": "clientguard", "peer": "pppoe"}
         ttl_s = request.get("ttl_s")
         if ttl_s:
             payload["ttl_s"] = int(ttl_s)
-        return control.send_command(self._fg_socket(), payload)
+        resp = control.send_command(self._fg_socket(), payload)
+        # Achado real de revisão: este caminho manual nunca passava pela exceção de
+        # PBR (flowspec_mitigation.push_pbr_bypass) — só a mitigação automática dos
+        # detectores era coberta. Sem isso, um bloqueio manual "aplicava" mas o PBR
+        # da caixa PPPoE continuava redirecionando o cliente pro A10 antes do
+        # FlowSpec agir, do jeito exato que motivou a correção inteira.
+        if resp.get("ok") and resp.get("rule_id") is not None:
+            bypass_result = flowspec_mitigation.push_pbr_bypass(
+                rule, resp["rule_id"], self.daemon_ref.flowspec_mitigation_cfg, self._flowguard_path())
+            if not bypass_result.get("ok") and not bypass_result.get("skipped"):
+                LOG.error("bloqueio manual de %s: FlowSpec anunciado mas exceção de PBR falhou: %s",
+                          ip, bypass_result.get("error"))
+                resp = {**resp, "pbr_bypass_error": bypass_result.get("error")}
+        return resp
 
     def _cmd_block_del(self, request: dict) -> dict:
         rule_id = request.get("id")
         if not rule_id:
             return {"ok": False, "error": "id obrigatório"}
-        return control.send_command(self._fg_socket(), {"cmd": "flowspec_del", "rule_id": rule_id})
+        resp = control.send_command(self._fg_socket(), {"cmd": "flowspec_del", "rule_id": rule_id})
+        # Espelha a limpeza da exceção de PBR — sem isso, bloqueios manuais removidos
+        # pelo botão "Remover" deixariam a entrada na ACL 3001 órfã pra sempre (só a
+        # expiração por TTL do FlowSpec/expire_due sabe reverter mitigações
+        # automáticas; um bloqueio manual apagado explicitamente não passava por
+        # nenhum dos dois). Não sabemos o src_ip aqui (só o id da regra) — usamos
+        # "-" só pro registro de auditoria, a remoção em si é por rule_id.
+        if resp.get("ok"):
+            bypass_result = flowspec_mitigation.remove_pbr_bypass(
+                int(rule_id), "-", self.daemon_ref.flowspec_mitigation_cfg, self._flowguard_path())
+            if not bypass_result.get("ok") and not bypass_result.get("skipped"):
+                LOG.error("remoção manual de bloqueio (regra %s): exceção de PBR não removida: %s",
+                          rule_id, bypass_result.get("error"))
+        return resp
 
     def _cmd_block_list(self, request: dict) -> dict:
         resp = control.send_command(self._fg_socket(), {"cmd": "rules"})

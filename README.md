@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.19.0**
+**Versão atual: v1.20.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -98,10 +98,53 @@ clientguard-cli toggles set <funcao> on|off
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
 
+### v1.20.0 — 2026-07-03 — Revisão do fix de PBR: 4 bugs reais na própria correção
+Revisão de código (5 frentes independentes) na correção v1.19.0 achou que a
+correção do bypass de PBR podia falhar do mesmo jeito silencioso que o bug
+original — corrigido:
+
+- **Falha do push SSH era ignorada** (`apply_and_record`) — se o SSH da exceção
+  de PBR falhasse depois do FlowSpec anunciado com sucesso, a mitigação ainda
+  ficava gravada/retornada como "active". Agora o status reflete os dois
+  passos: só é "active" de verdade se FlowSpec **e** a exceção de PBR deram
+  certo; se a exceção falhar, status vira "failed" com o erro registrado.
+- **`rate_limit` também recebia bypass de PBR** — errado: `spam_bot`/
+  `amplifier_hosted` (destinos da internet, não internos) usam `rate_limit`
+  porque a intenção é só desacelerar, não bloquear. Tirar esse tráfego do
+  CGNAT quebra a tradução de endereço do fluxo inteiro (IP do pool CGNAT não é
+  roteável na internet sem NAT) — um sinal que devia só ficar mais lento virava
+  corte total de conexão. `push_pbr_bypass` agora só age em ações `discard`.
+- **Reversão removia a exceção mesmo quando o `flowspec_del` falhava de
+  verdade** (não só a corrida "já está inativa") — a regra FlowSpec continuava
+  ativa protegendo, mas o bypass sumia, voltando a expor o cliente ao
+  redirecionamento antes do FlowSpec agir. `revert_and_record` só remove a
+  exceção quando o FlowSpec realmente saiu do ar, e agora também reporta (no
+  banco e no retorno) se a própria remoção da exceção falhar.
+- **Bloqueio manual (`_cmd_block_add`/`_cmd_block_del`) nunca passava por essa
+  correção** — o botão "Bloquear IP manualmente" da aba ClientGuard mandava o
+  comando direto pro FlowGuard sem `peer="pppoe"` (mesmo bug de peer errado já
+  corrigido pro caminho automático) nem a exceção de PBR. Os dois agora ganham
+  os mesmos dois ajustes. Resíduo conhecido: um bloqueio manual cujo TTL expira
+  sozinho no FlowGuard (sem passar por "Remover" no portal) ainda pode deixar
+  uma exceção órfã na ACL — só o caminho automático (via `expire_due`) tem
+  rastreamento completo de ciclo de vida hoje.
+- Também corrigido, com risco menor: sessões SSH concorrentes pro mesmo
+  equipamento agora são serializadas por um lock (`_PBR_BYPASS_LOCK` — dois
+  commits simultâneos no modelo de candidate-config do VRP podiam colidir);
+  `expire_due` deixou de bloquear a thread principal do daemon (cada reversão
+  expirada roda numa thread própria, mesmo padrão fire-and-forget de
+  `trigger_async` — evita atrasar o próximo ciclo de agregação de NetFlow se
+  várias mitigações expirarem juntas); ações de bypass passaram a ser
+  auditadas no mesmo `logs/edge-audit.jsonl` de qualquer outra ação SSH do
+  sistema (antes ficavam invisíveis por chamar `_run_commands` direto).
+- Generalizado o nome do equipamento nesta entrada de changelog (era citado
+  nominalmente, violando a regra de sanitização antes do GitHub).
+- 10 testes novos (199 no total) cobrindo cada um dos cenários de falha acima.
+
 ### v1.19.0 — 2026-07-03 — FlowSpec era "aplicado" mas não bloqueava de verdade (PBR)
 Usuário reportou: mitigação FlowSpec aparecia "ativa" no banco/portal, mas o
 cliente não era bloqueado de verdade — testado e confirmado por ele. Diagnóstico
-via SSH read-only na caixa PPPoE (`HUAWEI-PPPOE-222`, credenciais já em
+via SSH read-only na caixa PPPoE (roteador de borda, credenciais já em
 `warmode.yaml` do FlowGuard) + captura real do NetFlow:
 
 - **BGP FlowSpec estava sendo entregue corretamente** — `display bgp flow peer
@@ -136,7 +179,7 @@ via SSH read-only na caixa PPPoE (`HUAWEI-PPPOE-222`, credenciais já em
   Acionado automaticamente dentro de `apply_and_record`/`revert_and_record`/
   `expire_due` — nenhuma mudança de comportamento pra quem não habilitar
   `pbr_bypass.enabled`.
-- **Achado de plataforma**: VRP V8 (NE8000, `huawei_vrpv8`) usa modelo de
+- **Achado de plataforma**: a plataforma do roteador de borda usa modelo de
   candidate-config — precisa de `commit` explícito depois de editar a ACL
   (confirmado nos comandos manuais que o usuário já usava em `warmode.yaml`).
   `send_config_set` do Netmiko entra/sai de `system-view`/ACL automaticamente,

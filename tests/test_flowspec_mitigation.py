@@ -12,6 +12,18 @@ import flowspec_mitigation as fm
 import storage
 
 
+def _wait_until(predicate, timeout_s=2.0, interval_s=0.01):
+    """Espera uma condição virar verdadeira — usado só pra sincronizar com o
+    trabalho disparado em thread própria por expire_due (fire-and-forget de
+    verdade, sem essa espera o teste vira uma corrida com o mock)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(interval_s)
+    raise AssertionError("condição não satisfeita dentro do timeout")
+
+
 @pytest.fixture
 def conn():
     c = storage.connect(":memory:", check_same_thread=False)
@@ -263,12 +275,16 @@ def test_revert_and_record_already_inactive_counts_as_reverted(conn):
 
 
 def test_expire_due_only_processes_flowspec_mechanism(conn):
+    # expire_due dispara cada revert numa thread própria (achado de revisão: SSH
+    # síncrono não pode bloquear o loop principal do daemon) — a contagem
+    # retornada é "quantas estavam due", o processamento em si é assíncrono.
     flowspec_id = storage.insert_edge_mitigation(conn, "1.2.3.4", None, -10, "auto",
                                                    mechanism="flowspec", flowspec_rule_id=1)
     ssh_id = storage.insert_edge_mitigation(conn, "5.6.7.8", None, -10, "auto", mechanism="ssh")
     with patch("control.send_command", return_value={"ok": True}) as mock:
         count = fm.expire_due(conn, None, "/fake.sock")
-    assert count == 1
+        assert count == 1
+        _wait_until(lambda: mock.call_count >= 1)
     mock.assert_called_once()
     assert storage.get_edge_mitigation(conn, flowspec_id)["status"] == "reverted"
     assert storage.get_edge_mitigation(conn, ssh_id)["status"] == "active"  # não é problema deste módulo
@@ -345,7 +361,7 @@ def test_remove_pbr_bypass_enabled_sends_undo(tmp_path):
     fake_conn = MagicMock()
     fake_conn.send_config_set.return_value = "ok"
     with patch("netmiko.ConnectHandler", return_value=fake_conn):
-        result = fm.remove_pbr_bypass(184, cfg, flowguard_path)
+        result = fm.remove_pbr_bypass(184, "100.64.1.2", cfg, flowguard_path)
     assert result["ok"] is True
     sent = fake_conn.send_config_set.call_args[0][0]
     assert sent == ["acl number 3001", "undo rule 50184", "quit", "commit"]
@@ -405,3 +421,144 @@ def test_revert_and_record_skips_pbr_bypass_when_cfg_not_passed(conn):
          patch("netmiko.ConnectHandler") as mock_handler:
         fm.revert_and_record(conn, None, mitigation_id, "/fake.sock")  # sem cfg (compat)
     mock_handler.assert_not_called()
+
+
+# --- correções de revisão 2026-07-03: falha de push/remove não pode ficar muda ---
+
+def test_apply_and_record_marks_failed_when_pbr_bypass_push_fails(tmp_path, conn):
+    # achado real: antes disso, uma falha no SSH da exceção de PBR era só logada —
+    # a mitigação ficava "active" mesmo sem proteção nenhuma de verdade.
+    flowguard_path = _write_warmode_yaml(tmp_path)
+    cfg = _cfg(pbr_bypass={"enabled": True, "warmode_device": "HUAWEI-PPPOE-222",
+                            "acl_number": 3001, "rule_id_base": 50000})
+    with patch("control.send_command", return_value={"ok": True, "rule_id": 184}), \
+         patch("netmiko.ConnectHandler", side_effect=OSError("conexão recusada")):
+        result = fm.apply_and_record(conn, None, "100.64.1.2", None, "port_scan_horizontal",
+                                      {"dst_port": "25252", "protocol": "udp"}, 3600, "auto", cfg,
+                                      "/fake.sock", flowguard_path=flowguard_path)
+    assert result["ok"] is False
+    assert "PBR" in result["error"]
+    row = storage.get_edge_mitigation(conn, result["id"])
+    assert row["status"] == "failed"
+    assert row["error"] is not None
+
+
+def test_apply_and_record_skips_pbr_bypass_for_rate_limit_action(tmp_path, conn):
+    # achado real: aplicar o bypass também em rate_limit tira a tradução NAT de um
+    # fluxo que deveria só ser desacelerado, não perder conectividade por completo.
+    flowguard_path = _write_warmode_yaml(tmp_path)
+    cfg = _cfg(pbr_bypass={"enabled": True, "warmode_device": "HUAWEI-PPPOE-222",
+                            "acl_number": 3001, "rule_id_base": 50000})
+    with patch("control.send_command", return_value={"ok": True, "rule_id": 184}), \
+         patch("netmiko.ConnectHandler") as mock_handler:
+        result = fm.apply_and_record(conn, None, "100.64.1.2", None, "spam_bot", None,
+                                      3600, "auto", cfg, "/fake.sock", flowguard_path=flowguard_path)
+    assert result["ok"] is True
+    mock_handler.assert_not_called()  # rate_limit nunca deveria abrir SSH nenhum
+
+
+def test_push_pbr_bypass_skips_rate_limit_action_directly(tmp_path):
+    flowguard_path = _write_warmode_yaml(tmp_path)
+    cfg = _cfg(pbr_bypass={"enabled": True, "warmode_device": "HUAWEI-PPPOE-222",
+                            "acl_number": 3001, "rule_id_base": 50000})
+    with patch("netmiko.ConnectHandler") as mock_handler:
+        result = fm.push_pbr_bypass({"src_prefix": "100.64.1.2/32", "action": "rate-limit:200000"},
+                                     184, cfg, flowguard_path)
+    assert result == {"ok": True, "skipped": "pbr_bypass_only_for_discard"}
+    mock_handler.assert_not_called()
+
+
+def test_revert_and_record_does_not_remove_bypass_when_flowspec_del_really_fails(tmp_path, conn):
+    # achado real: antes disso, a exceção de PBR era removida mesmo quando o
+    # flowspec_del falhava de verdade (não só a corrida "já está inativa") — a
+    # regra FlowSpec continuava ativa protegendo, mas o bypass sumia, e o tráfego
+    # voltava a ser redirecionado pro A10 antes do FlowSpec (ainda ativo) agir.
+    flowguard_path = _write_warmode_yaml(tmp_path)
+    cfg = _cfg(pbr_bypass={"enabled": True, "warmode_device": "HUAWEI-PPPOE-222",
+                            "acl_number": 3001, "rule_id_base": 50000})
+    mitigation_id = storage.insert_edge_mitigation(conn, "100.64.1.2", None, 3600, "auto",
+                                                     mechanism="flowspec", flowspec_rule_id=184)
+    with patch("control.send_command", return_value={"ok": False, "error": "timeout ao falar com o daemon"}), \
+         patch("netmiko.ConnectHandler") as mock_handler:
+        result = fm.revert_and_record(conn, None, mitigation_id, "/fake.sock", cfg, flowguard_path)
+    assert result["ok"] is False
+    mock_handler.assert_not_called()  # bypass NÃO deve ser tocado — FlowSpec ainda ativo
+    row = storage.get_edge_mitigation(conn, mitigation_id)
+    assert row["status"] == "failed"
+
+
+def test_revert_and_record_reports_bypass_removal_failure(tmp_path, conn):
+    # achado real: o retorno de remove_pbr_bypass era descartado — se o SSH falhar
+    # na hora de tirar a exceção, a entrada fica órfã na ACL pra sempre, sem
+    # nenhum sinal disso em lugar nenhum.
+    flowguard_path = _write_warmode_yaml(tmp_path)
+    cfg = _cfg(pbr_bypass={"enabled": True, "warmode_device": "HUAWEI-PPPOE-222",
+                            "acl_number": 3001, "rule_id_base": 50000})
+    mitigation_id = storage.insert_edge_mitigation(conn, "100.64.1.2", None, 3600, "auto",
+                                                     mechanism="flowspec", flowspec_rule_id=184)
+    with patch("control.send_command", return_value={"ok": True}), \
+         patch("netmiko.ConnectHandler", side_effect=OSError("conexão recusada")):
+        result = fm.revert_and_record(conn, None, mitigation_id, "/fake.sock", cfg, flowguard_path)
+    assert result["ok"] is False
+    assert result.get("flowspec_reverted") is True
+    row = storage.get_edge_mitigation(conn, mitigation_id)
+    assert row["status"] == "failed"
+    assert "PBR" in row["error"]
+
+
+def test_pbr_bypass_actions_are_serialized_by_a_lock(tmp_path):
+    # achado real: duas mitigações no mesmo ciclo abriam sessões SSH concorrentes
+    # pro mesmo equipamento — sem lock, dois commits podem colidir no modelo de
+    # candidate-config do VRP V8. Prova que _pbr_bypass_ssh respeita o lock global:
+    # com o lock já preso por fora, uma chamada em thread separada tem que
+    # bloquear até o lock ser liberado.
+    import threading
+
+    flowguard_path = _write_warmode_yaml(tmp_path)
+    cfg = _cfg(pbr_bypass={"enabled": True, "warmode_device": "HUAWEI-PPPOE-222",
+                            "acl_number": 3001, "rule_id_base": 50000})
+    fake_conn = MagicMock()
+    fake_conn.send_config_set.return_value = "ok"
+
+    started = threading.Event()
+    finished = threading.Event()
+
+    def _run():
+        started.set()
+        with patch("netmiko.ConnectHandler", return_value=fake_conn):
+            fm.push_pbr_bypass({"src_prefix": "100.64.1.2/32", "action": "discard"}, 1, cfg, flowguard_path)
+        finished.set()
+
+    assert fm._PBR_BYPASS_LOCK.acquire(blocking=False)
+    try:
+        t = threading.Thread(target=_run)
+        t.start()
+        assert started.wait(timeout=1.0)
+        # a thread começou mas não pode ter terminado — está bloqueada no lock
+        assert not finished.wait(timeout=0.2)
+    finally:
+        fm._PBR_BYPASS_LOCK.release()
+    t.join(timeout=2.0)
+    assert finished.is_set()
+
+
+def test_push_pbr_bypass_writes_audit_log(tmp_path, monkeypatch):
+    # achado real: _pbr_bypass_ssh chamava _run_commands direto, pulando
+    # apply_block/revert_block — as únicas funções que gravam em edge-audit.jsonl.
+    # Isso deixava toda ação de bypass invisível na trilha de auditoria SSH do
+    # sistema. Agora _pbr_bypass_ssh grava no mesmo log via edge_mitigation._audit.
+    import edge_mitigation
+
+    flowguard_path = _write_warmode_yaml(tmp_path)
+    cfg = _cfg(pbr_bypass={"enabled": True, "warmode_device": "HUAWEI-PPPOE-222",
+                            "acl_number": 3001, "rule_id_base": 50000})
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(edge_mitigation, "AUDIT_LOG_PATH", str(audit_path))
+    fake_conn = MagicMock()
+    fake_conn.send_config_set.return_value = "ok"
+    with patch("netmiko.ConnectHandler", return_value=fake_conn):
+        fm.push_pbr_bypass({"src_prefix": "100.64.1.2/32", "action": "discard"}, 184, cfg, flowguard_path)
+    assert audit_path.exists()
+    content = audit_path.read_text(encoding="utf-8")
+    assert "pbr_bypass_apply" in content
+    assert "100.64.1.2/32" in content
