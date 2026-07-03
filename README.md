@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.16.0**
+**Versão atual: v1.17.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,37 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.17.0 — 2026-07-03 — Captura passa do A10 (CGNAT) pro NE8000-PPPOE
+- Pedido do usuário: escutar mais um equipamento de NetFlow (o A10 que faz
+  CGNAT) além do NE8000 já observado. Confirmado por captura real que o
+  `src_ip` desse feed é PRÉ-NAT (IP interno do cliente em `100.64.0.0/16`,
+  um IP por cliente) — cada cliente já chega identificável, sem precisar de
+  `client_multiplier`.
+- **Achado real na validação**: o A10 não preenche o campo `SAMPLING_INTERVAL`
+  do NetFlow e não tem sampling configurado no equipamento (log completo,
+  não amostrado) — volume de ~157 mil flows/25s estourou a fila interna do
+  daemon (200k, drenada 1x por ciclo de 30s de agregação), causando descarte
+  silencioso de dezenas de milhares de flows por minuto. Novo campo de
+  config `capture.sampling_rate_by_peer` (por IP de origem do export)
+  resolveria o cálculo de bytes/pacotes, mas não o problema de volume em si.
+- A pedido do usuário, a captura do A10 foi pausada (removida do
+  `bpf_filter`) e substituída pelo NetFlow do NE8000-PPPOE (mesmo roteador
+  usado pro Modo Guerra/ACL, exportando numa porta separada) — volume bem
+  menor (~155 flows/s), sem risco de estourar a fila. Também confirmado
+  pré-NAT, mesma lógica de sampling ausente (assumido 1:1).
+- **Incidente durante a validação**: ao tentar reiniciar o serviço isolando
+  essa mudança do trabalho em progresso (migração pra mitigação via FlowSpec,
+  ainda não commitada), uma versão temporária de `clientguard.py` ficou
+  inconsistente com `detector.py` (`edge_cfg` vs `mitigation_cfg`),
+  derrubando o daemon em crash-loop por ~1min até ser corrigido restaurando
+  o arquivo completo. Lição: nunca isolar um arquivo do trabalho em
+  progresso de outra pessoa sem conferir consistência com os arquivos que
+  ele importa/chama antes de reiniciar um serviço de produção.
+- **Pendência em aberto**: `client_multiplier: 32` em `customers.yaml` pra
+  `100.64.0.0/10` pressupõe IP compartilhado por vários clientes (pós-NAT) —
+  mas confirmamos que é pré-NAT (1 IP = 1 cliente). Ainda não corrigido,
+  precisa de decisão do usuário.
 
 ### v1.16.0 — 2026-07-02 — Detalhe de mitigação de borda + falha passa a ficar registrada
 - `edge_mitigations` ganhou 4 colunas (`apply_commands`, `apply_output`,
