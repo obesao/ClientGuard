@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.17.1**
+**Versão atual: v1.18.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,23 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.18.0 — 2026-07-03 — Mitigação de port scan mais precisa + 2 bugs reais
+- Antes, mitigar um scan (discard ou rate_limit) sempre mirava o cliente
+  inteiro (`src_prefix/32`) — rate_limit mal freava o scan de verdade (sonda
+  é pacote pequeno, não banda) e discard custava caro (derrubava toda a
+  conexão do cliente). Agora `port_scan_horizontal` recorta pela porta
+  escaneada e `port_scan_vertical` pelo IP vítima — e com esse recorte,
+  passam a usar `discard` (seguro agora, só afeta a porta/vítima específica).
+- `dns_tunneling` ganhou o `dst_prefix` do resolver suspeito no recorte
+  (já tinha protocol/dst_port, faltava isso) — rate-limit não afeta mais
+  consultas a resolvers legítimos.
+- **2 bugs reais corrigidos** (ambos faziam a mitigação "aplicar" no banco
+  sem efeito real nenhum): (1) toda mitigação ia pro peer BGP errado
+  ('main'/NE8000BGP em vez de 'pppoe'/NE8000-PPPOE, que é por onde o
+  tráfego de cliente realmente passa desde a v1.17.1); (2) `build_rule()`
+  descartava o recorte inteiro no branch `discard`, só aplicava no
+  `rate_limit`.
 
 ### v1.17.1 — 2026-07-03 — Escuta só a caixa PPPOE, desliga a caixa BGP
 - Pedido do usuário: parar de escutar as 2 caixas (NE8000BGP na porta 2055,
