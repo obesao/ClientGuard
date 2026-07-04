@@ -118,6 +118,12 @@ detection:
   dns_tunneling_min_queries: 20000
   window_s: 30
   min_duration_s: 10
+  # rede de segurança: resolve sozinho um sinal sem atualização (ts_last_seen) há
+  # mais desse tempo (ver storage.py::resolve_stale_signals) — os detectores só
+  # tocam um sinal quando a condição bate de novo, então sem isso um sinal cujo
+  # cliente parou de fato (scan/spam/etc encerrado) ficava "aberto" pra sempre até
+  # clique manual em "Resolver", mesmo com a mitigação associada já expirada.
+  signal_stale_resolve_s: 21600
 
 alerts:
   webhook_url: ""

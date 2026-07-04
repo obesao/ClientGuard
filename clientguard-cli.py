@@ -169,7 +169,7 @@ def cmd_top(args: argparse.Namespace, sock_path: str) -> None:
 _MITIGATION_MECHANISM_LABELS = {"flowspec": "FlowSpec", "ssh": "SSH/ACL"}
 
 
-def _fmt_mitigation_cell(mitigation: dict | None) -> str:
+def _fmt_mitigation_cell(mitigation: dict | None, row_open: bool = False) -> str:
     if not mitigation:
         return "[dim]sem mitigação[/dim]"
     mechanism = _MITIGATION_MECHANISM_LABELS.get(mitigation["mechanism"], mitigation["mechanism"])
@@ -177,6 +177,10 @@ def _fmt_mitigation_cell(mitigation: dict | None) -> str:
         return f"[green]🛡 ativa ({mechanism})[/green]"
     if mitigation["status"] == "failed":
         return f"[red]falhou ({mechanism})[/red]"
+    # sinal ainda aberto (resolved=0) com mitigação já encerrada = cliente SEM
+    # proteção agora, não é só histórico — pedido do usuário pra deixar isso claro
+    if row_open:
+        return f"[red]⚠ sem proteção ({mechanism})[/red]"
     return f"[dim]encerrada ({mechanism})[/dim]"  # reverted (TTL vencido, manual, ou reconciliação)
 
 
@@ -198,7 +202,7 @@ def cmd_suspicious(args: argparse.Namespace, sock_path: str) -> None:
             str(row["id"]), row["src_ip"], row["customer_prefix"] or "-",
             SIGNAL_LABELS.get(row["signal_type"], row["signal_type"]),
             f"{(row['confidence'] or 0) * 100:.0f}%", fmt_ts(row["ts_detected"]), fmt_ts(row["ts_last_seen"]),
-            _fmt_mitigation_cell(row.get("mitigation")),
+            _fmt_mitigation_cell(row.get("mitigation"), not row.get("resolved")),
         )
     if not resp["suspicious"]:
         console.print(f"[green]{title}: nenhum registro.[/green]")

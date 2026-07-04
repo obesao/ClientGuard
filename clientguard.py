@@ -262,6 +262,17 @@ class ClientGuardDaemon:
             if pruned_baselines:
                 LOG.info("baseline de tráfego: %d entrada(s) removida(s) por inatividade", pruned_baselines)
 
+            # rede de segurança: detector.py é 100% orientado a evidência nova — se a
+            # condição parar de bater, o sinal simplesmente não é mais tocado e fica
+            # "aberto" pra sempre sem isso, mesmo que a mitigação associada já tenha
+            # expirado há muito tempo (ver storage.resolve_stale_signals).
+            signal_stale_s = self.config.get("detection", {}).get("signal_stale_resolve_s", 21600)
+            with self.db_lock:
+                stale_signals = storage.resolve_stale_signals(self.conn, signal_stale_s)
+            if stale_signals:
+                LOG.info("sinais suspeitos: %d resolvido(s) automaticamente por inatividade (>%ds sem atualização)",
+                          len(stale_signals), signal_stale_s)
+
     def run(self) -> None:
         interval = self.config["database"]["aggregate_interval_s"]
         capture_thread = threading.Thread(target=self.capture_loop, daemon=True, name="clientguard-capture")

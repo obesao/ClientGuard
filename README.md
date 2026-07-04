@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.23.0**
+**Versão atual: v1.24.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,33 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.24.0 — 2026-07-04 — Sinal suspeito não fica "aberto" pra sempre quando a mitigação expira
+Pedido do usuário (mesma correção do FlowGuard, aplicada aqui): um sinal
+suspeito continuava "aberto" mesmo muito depois de a mitigação associada já
+ter expirado.
+
+Causa raiz: `detector.py` é 100% orientado a evidência nova — cada detector só
+toca um sinal quando a condição bate de novo; se o cliente realmente parou
+(scan/spam/etc encerrado), o sinal simplesmente nunca mais é tocado e fica
+"aberto" pra sempre, sem nenhum fechamento automático por inatividade (bem
+mais grave que o caso do FlowGuard, que já fechava sozinho quando o tráfego
+caía — aqui não existia fechamento automático nenhum).
+
+- `suspicious_clients` ganha `resolved_reason` ('manual' | 'auto_stale') pra
+  distinguir clique manual em "Resolver" de resolução automática.
+- Novo `resolve_stale_signals`, rodando 1x/hora junto do prune de retenção:
+  resolve sozinho qualquer sinal sem atualização (`ts_last_seen`) há mais de
+  `detection.signal_stale_resolve_s` (padrão 6h).
+- Selo de mitigação (aba Sinais Suspeitos, portal e CLI) muda de "encerrada"
+  (neutro) pra "⚠ sem proteção" (vermelho) quando o sinal segue aberto mas a
+  última mitigação já não está mais em vigor.
+
+Validado ao vivo: restart do daemon (junto com o do FlowGuard, que zera as
+regras BGP ativas — ver reconciliação automática) fez aparecer corretamente
+vários selos "⚠ sem proteção" nos sinais cuja mitigação tinha acabado de cair,
+tanto no CLI quanto no portal, sem erro de console. 4 testes novos em
+`tests/test_storage.py`.
 
 ### v1.23.0 — 2026-07-04 — Repassa trigger_type pro FlowGuard + equipamento na aba Regras
 Pedido do usuário: aba Regras sinalizar mecanismo/equipamento/gatilho/status

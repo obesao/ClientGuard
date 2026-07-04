@@ -49,6 +49,61 @@ def test_resolve_signal_returns_false_for_unknown_id(conn):
     assert storage.resolve_signal(conn, 999999) is False
 
 
+def test_resolve_signal_sets_reason_manual(conn):
+    signal_id = storage.insert_suspicious_client(conn, {
+        "src_ip": "177.86.19.20", "customer_prefix": None,
+        "signal_type": "spam_bot", "confidence": 0.8, "evidence": "{}",
+    })
+    storage.resolve_signal(conn, signal_id)
+    row = conn.execute("SELECT resolved_reason FROM suspicious_clients WHERE id = ?", (signal_id,)).fetchone()
+    assert row["resolved_reason"] == "manual"
+
+
+def test_resolve_stale_signals_resolves_only_past_cutoff(conn):
+    now = int(time.time())
+    stale_id = storage.insert_suspicious_client(conn, {
+        "src_ip": "177.86.19.21", "customer_prefix": None,
+        "signal_type": "spam_bot", "confidence": 0.8, "evidence": "{}",
+    })
+    conn.execute("UPDATE suspicious_clients SET ts_last_seen = ? WHERE id = ?", (now - 25000, stale_id))
+    conn.commit()
+
+    fresh_id = storage.insert_suspicious_client(conn, {
+        "src_ip": "177.86.19.22", "customer_prefix": None,
+        "signal_type": "spam_bot", "confidence": 0.8, "evidence": "{}",
+    })
+
+    resolved = storage.resolve_stale_signals(conn, stale_s=21600)
+
+    resolved_ids = {row["id"] for row in resolved}
+    assert resolved_ids == {stale_id}
+    assert storage.get_open_signal(conn, "177.86.19.21", "spam_bot") is None
+    assert storage.get_open_signal(conn, "177.86.19.22", "spam_bot")["id"] == fresh_id
+
+    reason = conn.execute("SELECT resolved_reason FROM suspicious_clients WHERE id = ?", (stale_id,)).fetchone()
+    assert reason["resolved_reason"] == "auto_stale"
+
+
+def test_resolve_stale_signals_no_candidates_returns_empty(conn):
+    storage.insert_suspicious_client(conn, {
+        "src_ip": "177.86.19.23", "customer_prefix": None,
+        "signal_type": "spam_bot", "confidence": 0.8, "evidence": "{}",
+    })
+    assert storage.resolve_stale_signals(conn, stale_s=21600) == []
+
+
+def test_resolve_stale_signals_ignores_already_resolved(conn):
+    now = int(time.time())
+    signal_id = storage.insert_suspicious_client(conn, {
+        "src_ip": "177.86.19.24", "customer_prefix": None,
+        "signal_type": "spam_bot", "confidence": 0.8, "evidence": "{}",
+    })
+    storage.resolve_signal(conn, signal_id)
+    conn.execute("UPDATE suspicious_clients SET ts_last_seen = ? WHERE id = ?", (now - 25000, signal_id))
+    conn.commit()
+    assert storage.resolve_stale_signals(conn, stale_s=21600) == []
+
+
 def test_clear_open_signals_resolves_only_open_ones(conn):
     already_resolved = storage.insert_suspicious_client(conn, {
         "src_ip": "177.86.19.10", "customer_prefix": None,

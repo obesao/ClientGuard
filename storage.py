@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS suspicious_clients (
   evidence        TEXT,
   ai_explanation  TEXT,
   notified        INTEGER DEFAULT 0,
-  resolved        INTEGER DEFAULT 0
+  resolved        INTEGER DEFAULT 0,
+  resolved_reason TEXT   -- 'manual' | 'auto_stale' | NULL (ainda aberto)
 );
 
 -- Cache persistente de geoip.GeoIPCache — ASN/país de um IP não muda em escala de
@@ -123,6 +124,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE edge_mitigations ADD COLUMN match_json TEXT")
     if "rate_limit_bps" not in edge_cols:
         conn.execute("ALTER TABLE edge_mitigations ADD COLUMN rate_limit_bps INTEGER")
+
+    susp_cols = {row["name"] for row in conn.execute("PRAGMA table_info(suspicious_clients)")}
+    if "resolved_reason" not in susp_cols:
+        # distingue resolução manual (clique em "Resolver"/"Limpar hosts suspeitos")
+        # de resolve_stale_signals (sinal sem atualização há muito tempo, com a
+        # mitigação associada — se houve — já expirada) — sem isso, um sinal antigo
+        # do qual o cliente já desistiu ficava "aberto" pra sempre, exigindo clique
+        # manual mesmo depois de a mitigação ter caído há horas.
+        conn.execute("ALTER TABLE suspicious_clients ADD COLUMN resolved_reason TEXT")
+        conn.execute("UPDATE suspicious_clients SET resolved_reason = 'manual' WHERE resolved = 1")
     conn.commit()
 
 
@@ -292,7 +303,8 @@ def recent_signal_src_ips(conn: sqlite3.Connection, signal_type: str, since_ts: 
 
 def resolve_signal(conn: sqlite3.Connection, signal_id: int) -> bool:
     cur = conn.execute(
-        "UPDATE suspicious_clients SET resolved = 1 WHERE id = ? AND resolved = 0", (signal_id,),
+        "UPDATE suspicious_clients SET resolved = 1, resolved_reason = 'manual' WHERE id = ? AND resolved = 0",
+        (signal_id,),
     )
     conn.commit()
     return cur.rowcount > 0
@@ -302,9 +314,32 @@ def clear_open_signals(conn: sqlite3.Connection) -> int:
     """Resolve TODOS os sinais abertos de uma vez (botão "Limpar hosts suspeitos" do
     portal) — marca resolved=1 em vez de apagar a linha, igual resolve_signal, pra manter
     o histórico/evidência/explicação de IA consultável na aba "Resolvidos"."""
-    cur = conn.execute("UPDATE suspicious_clients SET resolved = 1 WHERE resolved = 0")
+    cur = conn.execute("UPDATE suspicious_clients SET resolved = 1, resolved_reason = 'manual' WHERE resolved = 0")
     conn.commit()
     return cur.rowcount
+
+
+def resolve_stale_signals(conn: sqlite3.Connection, stale_s: int) -> list[dict]:
+    """Rede de segurança: resolve sozinho um sinal sem atualização (ts_last_seen) há
+    mais de stale_s. Os detectores (detector.py) são 100% orientados a evidência nova
+    — se a condição parar de bater, o sinal simplesmente não é mais tocado, e sem
+    isso ficaria "aberto" pra sempre até um clique manual em "Resolver", mesmo que a
+    mitigação associada (se houve) já tenha expirado há muito tempo. Retorna os
+    sinais resolvidos (dict completo) pra quem chamar logar/notificar."""
+    cutoff = int(time.time()) - stale_s
+    rows = conn.execute(
+        "SELECT * FROM suspicious_clients WHERE resolved = 0 AND ts_last_seen < ?", (cutoff,),
+    ).fetchall()
+    if not rows:
+        return []
+    ids = [row["id"] for row in rows]
+    conn.execute(
+        f"UPDATE suspicious_clients SET resolved = 1, resolved_reason = 'auto_stale' "
+        f"WHERE id IN ({','.join('?' * len(ids))})",
+        ids,
+    )
+    conn.commit()
+    return [dict(row) for row in rows]
 
 
 def top_src_ips(conn: sqlite3.Connection, window_s: int, limit: int) -> list[dict]:
