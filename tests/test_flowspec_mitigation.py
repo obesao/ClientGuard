@@ -290,6 +290,117 @@ def test_expire_due_only_processes_flowspec_mechanism(conn):
     assert storage.get_edge_mitigation(conn, ssh_id)["status"] == "active"  # não é problema deste módulo
 
 
+# --- reconciliação com o FlowGuard (achado real de auditoria, 2026-07-04) ---
+# flowguard.service reiniciar retira TODAS as regras ativas (BgpManager.
+# withdraw_all) sem avisar o ClientGuard — reconcile_with_flowguard existe pra
+# achar e corrigir esse gap a cada ciclo, em vez de esperar até 6h (default_ttl_s).
+
+def test_reconcile_returns_zero_and_skips_query_when_nothing_active(conn):
+    with patch("control.send_command") as mock:
+        count = fm.reconcile_with_flowguard(conn, None, "/fake.sock")
+    assert count == 0
+    assert not mock.called  # nem consulta o FlowGuard se não há nada local pra checar
+
+
+def test_reconcile_reverts_mitigation_whose_flowguard_rule_is_gone(conn):
+    mitigation_id = storage.insert_edge_mitigation(conn, "100.64.1.2", None, 3600, "auto",
+                                                     mechanism="flowspec", flowspec_rule_id=99)
+
+    def fake_send(sock_path, payload, *args, **kwargs):
+        if payload.get("cmd") == "rules":
+            return {"ok": True, "rules": []}  # rule_id 99 não está mais ativo no FlowGuard
+        if payload.get("cmd") == "flowspec_del":
+            return {"ok": False, "error": "regra já está inativa"}
+        raise AssertionError(f"comando inesperado: {payload}")
+
+    with patch("control.send_command", side_effect=fake_send):
+        count = fm.reconcile_with_flowguard(conn, None, "/fake.sock")
+        assert count == 1
+        _wait_until(lambda: storage.get_edge_mitigation(conn, mitigation_id)["status"] == "reverted")
+    row = storage.get_edge_mitigation(conn, mitigation_id)
+    assert row["status"] == "reverted"
+    assert row["error"] is None  # "já inativa" conta como sucesso, não falha (ver revert_and_record)
+
+
+def test_reconcile_leaves_mitigation_alone_when_flowguard_rule_still_active(conn):
+    mitigation_id = storage.insert_edge_mitigation(conn, "100.64.1.2", None, 3600, "auto",
+                                                     mechanism="flowspec", flowspec_rule_id=99)
+    with patch("control.send_command", return_value={"ok": True, "rules": [{"id": 99}]}) as mock:
+        count = fm.reconcile_with_flowguard(conn, None, "/fake.sock")
+    assert count == 0
+    mock.assert_called_once()  # só a consulta "rules" — nenhum flowspec_del disparado
+    assert storage.get_edge_mitigation(conn, mitigation_id)["status"] == "active"
+
+
+def test_reconcile_ignores_ssh_mechanism_mitigations(conn):
+    ssh_id = storage.insert_edge_mitigation(conn, "5.6.7.8", None, 3600, "auto", mechanism="ssh")
+    with patch("control.send_command") as mock:
+        count = fm.reconcile_with_flowguard(conn, None, "/fake.sock")
+    assert count == 0
+    assert not mock.called
+    assert storage.get_edge_mitigation(conn, ssh_id)["status"] == "active"
+
+
+def test_reconcile_handles_flowguard_query_failure_without_reverting(conn):
+    mitigation_id = storage.insert_edge_mitigation(conn, "100.64.1.2", None, 3600, "auto",
+                                                     mechanism="flowspec", flowspec_rule_id=99)
+    with patch("control.send_command", return_value={"ok": False, "error": "timeout"}):
+        count = fm.reconcile_with_flowguard(conn, None, "/fake.sock")
+    assert count == 0
+    assert storage.get_edge_mitigation(conn, mitigation_id)["status"] == "active"
+
+
+# --- guarda de "já em andamento" no trigger_async (achado real de produção,
+# 2026-07-04): sob carga, o tempo entre "FlowSpec anunciado" e a linha gravada em
+# edge_mitigations pode passar de um ciclo — sem essa guarda, o redisparo em sinal
+# contínuo via get_active_edge_mitigation (que ainda não achava nada) disparava
+# OUTRO apply_and_record pro MESMO src_ip, criando regras FlowSpec duplicadas.
+
+def test_trigger_async_does_not_duplicate_in_flight_apply_for_same_src_ip(conn):
+    import threading
+    release = threading.Event()
+    calls = []
+
+    def slow_apply(*args, **kwargs):
+        calls.append(args[2])  # src_ip
+        release.wait(timeout=2.0)
+        return {"ok": True}
+
+    with patch("flowspec_mitigation.apply_and_record", side_effect=slow_apply):
+        fm.trigger_async(conn, None, "1.2.3.4", 1, "port_scan_horizontal", None,
+                          _cfg(), "/fake.sock")
+        _wait_until(lambda: len(calls) == 1)
+        # 2ª chamada pro MESMO src_ip enquanto a 1ª ainda está "rodando" (presa em
+        # release.wait) -> deve ser ignorada, não empilhar outra apply_and_record
+        fm.trigger_async(conn, None, "1.2.3.4", 2, "port_scan_horizontal", None,
+                          _cfg(), "/fake.sock")
+        release.set()
+        _wait_until(lambda: "1.2.3.4" not in fm._applying_src_ips)
+    assert len(calls) == 1
+
+
+def test_trigger_async_allows_different_src_ips_concurrently(conn):
+    calls = []
+    with patch("flowspec_mitigation.apply_and_record",
+               side_effect=lambda *a, **k: calls.append(a[2]) or {"ok": True}):
+        fm.trigger_async(conn, None, "1.2.3.4", 1, "port_scan_horizontal", None, _cfg(), "/fake.sock")
+        fm.trigger_async(conn, None, "5.6.7.8", 2, "port_scan_horizontal", None, _cfg(), "/fake.sock")
+        _wait_until(lambda: len(calls) == 2)
+    assert sorted(calls) == ["1.2.3.4", "5.6.7.8"]
+
+
+def test_trigger_async_allows_retry_after_previous_apply_finished(conn):
+    calls = []
+    with patch("flowspec_mitigation.apply_and_record",
+               side_effect=lambda *a, **k: calls.append(a[2]) or {"ok": True}):
+        fm.trigger_async(conn, None, "1.2.3.4", 1, "port_scan_horizontal", None, _cfg(), "/fake.sock")
+        _wait_until(lambda: len(calls) == 1)
+        _wait_until(lambda: "1.2.3.4" not in fm._applying_src_ips)
+        fm.trigger_async(conn, None, "1.2.3.4", 2, "port_scan_horizontal", None, _cfg(), "/fake.sock")
+        _wait_until(lambda: len(calls) == 2)
+    assert calls == ["1.2.3.4", "1.2.3.4"]
+
+
 # --- bypass do CGNAT/PBR (achado real 2026-07-03) --------------------------
 
 def test_cidr_to_huawei_host():

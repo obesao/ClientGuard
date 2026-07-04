@@ -494,3 +494,48 @@ def test_off_action_does_not_call_trigger_async(conn, monkeypatch):
                                        mitigation_ctx={"cfg": _mitigation_cfg(), "fg_socket_path": "/fake.sock"})
     assert "malicious_contact" in signal_types(conn)
     assert not calls
+
+
+# --- redispara mitigação em sinal contínuo sem proteção ativa (achado real de
+# auditoria, 2026-07-04): flowguard.service reiniciar apaga a mitigação real
+# sem avisar o ClientGuard; sem isso, um cliente que continua abusando com o
+# MESMO sinal (nunca fecha) nunca era remitigado, porque apply_and_record só
+# reforça uma mitigação "já ativa" e a mitigação de sinal já existente nunca
+# rechamava trigger_async. ----------------------------------------------------
+
+def test_continued_signal_retriggers_mitigation_when_none_is_active(conn, monkeypatch):
+    calls = []
+    monkeypatch.setattr("flowspec_mitigation.trigger_async", lambda *a, **k: calls.append((a, k)))
+    ctx = {"cfg": _mitigation_cfg(), "fg_socket_path": "/fake.sock"}
+
+    for i in range(5):
+        insert_flow(conn, "177.86.19.97", f"45.11.{i}.1", 22, protocol=6)
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=5, whitelist=set(), mitigation_ctx=ctx)
+    assert len(calls) == 1  # sinal novo -> dispara normalmente
+
+    # cliente continua escaneando (mesmo sinal, ainda aberto) e NENHUMA mitigação
+    # está de fato ativa (ex: foi apagada por fora) — precisa disparar de novo
+    for i in range(5):
+        insert_flow(conn, "177.86.19.97", f"45.12.{i}.1", 22, protocol=6)
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=5, whitelist=set(), mitigation_ctx=ctx)
+    assert len(calls) == 2
+
+
+def test_continued_signal_does_not_retrigger_when_mitigation_still_active(conn, monkeypatch):
+    calls = []
+    monkeypatch.setattr("flowspec_mitigation.trigger_async", lambda *a, **k: calls.append((a, k)))
+    ctx = {"cfg": _mitigation_cfg(), "fg_socket_path": "/fake.sock"}
+
+    for i in range(5):
+        insert_flow(conn, "177.86.19.98", f"45.13.{i}.1", 22, protocol=6)
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=5, whitelist=set(), mitigation_ctx=ctx)
+    assert len(calls) == 1
+
+    # mitigação real está ativa (registrada no ClientGuard) -> não deve reforçar
+    # via trigger_async de novo, mesmo com o sinal ainda aberto e ativo
+    storage.insert_edge_mitigation(conn, "177.86.19.98", None, 3600, "auto",
+                                    mechanism="flowspec", flowspec_rule_id=1)
+    for i in range(5):
+        insert_flow(conn, "177.86.19.98", f"45.14.{i}.1", 22, protocol=6)
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=5, whitelist=set(), mitigation_ctx=ctx)
+    assert len(calls) == 1

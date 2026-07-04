@@ -4,7 +4,7 @@
 # 'discard' (bloqueio total), 'rate_limit' (limita banda) ou 'off' (não automatiza).
 # max_active_rules/dns_rate_limit_floor_bps/spam_rate_limit_bps/rate_limit_sigma só
 # à mão aqui.
-default_ttl_s: 3600
+default_ttl_s: 21600
 max_active_rules: 20
 dns_rate_limit_floor_bps: 200000
 spam_rate_limit_bps: 500000
@@ -12,20 +12,11 @@ rate_limit_sigma: 3
 auto_mitigate:
   port_scan_horizontal: discard
   port_scan_vertical: discard
-  spam_bot: rate_limit
+  spam_bot: discard
   dns_tunneling: discard
-  amplifier_hosted: rate_limit
+  amplifier_hosted: discard
   malicious_contact: 'off'
   coordinated_destination: 'off'
-# achado real 2026-07-03: traffic-policy P-CGNAT (global, na caixa PPPoE)
-# redireciona todo tráfego de cliente pro A10 com precedência MAIOR que o
-# filtro instalado pelo FlowSpec — confirmado com captura real (regra
-# 'discard' válida no roteador, tráfego do cliente pro alvo bloqueado
-# continuava passando). A ACL 3001 (classificador C-CGNAT-BYPASS) já tem
-# precedência mais alta e comportamento vazio (não redireciona) — usada aqui
-# como válvula de escape, espelhando o MESMO match da regra FlowSpec (nunca
-# mais amplo, cliente continua navegando normalmente pelo CGNAT no resto do
-# tráfego).
 pbr_bypass:
   enabled: true
   warmode_device: HUAWEI-PPPOE-222

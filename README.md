@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.20.0**
+**Versão atual: v1.21.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,72 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.21.0 — 2026-07-04 — Corrige mitigações "fantasma": reconciliação com o FlowGuard + redisparo em sinal contínuo
+Pedido do usuário: auditar as mitigações ativas do ClientGuard pra saber se
+estavam funcionando de verdade. **Achado real e crítico**: `flowguard.service`
+reiniciar retira TODAS as regras FlowSpec/RTBH ativas da borda no shutdown
+gracioso (`BgpManager.withdraw_all`, comportamento intencional do FlowGuard)
+— mas nada avisa o ClientGuard disso. Confirmado em produção: 2 restarts do
+`flowguard.service` na mesma sessão fizeram 20 mitigações automáticas
+(scanners) sobreviverem só no banco local do ClientGuard, marcadas "active"
+por até 6h (`default_ttl_s`) sem bloquear nada de verdade na borda — 32 sinais
+de scan continuavam abertos pros mesmos IPs, alguns escaneando no exato
+momento da auditoria.
+
+Duas causas compostas, corrigidas juntas:
+1. **Sem reconciliação**: o ClientGuard nunca conferia se a regra
+   correspondente (`flowspec_rule_id`) ainda existia de verdade no FlowGuard —
+   só confiava no próprio prazo local. Nova `flowspec_mitigation.
+   reconcile_with_flowguard()`, chamada a cada ciclo de agregação (30s) junto
+   com `expire_due` — só faz round-trip ao FlowGuard se houver pelo menos 1
+   mitigação `flowspec` "active" localmente. Reaproveita `revert_and_record`
+   pra cada mitigação órfã encontrada (mesma lógica que já trata "regra já
+   está inativa" como sucesso e já limpa a exceção de PBR associada — nenhuma
+   lógica de revert nova).
+2. **Sinal contínuo nunca redisparava mitigação**: `apply_and_record` só
+   estende o TTL local de uma mitigação "já ativa" (nunca reanuncia), e
+   `detector._record_signal` só disparava mitigação em sinal **novo** — um
+   cliente que continuasse abusando com o MESMO sinal (nunca fecha sozinho)
+   ficava permanentemente sem chance de ser remitigado, mesmo depois da
+   reconciliação acima corrigir o registro local. Agora, quando um sinal já
+   aberto é "tocado" de novo, o detector confere se há mitigação
+   **realmente ativa** pra aquele `src_ip` (`storage.get_active_edge_mitigation`)
+   e redispara `trigger_async` se não houver — não é o caminho comum (a
+   maioria dos ciclos não tem nada pra fazer), só o reparo desse gap
+   específico.
+
+Dois achados reais de concorrência durante a validação em produção (mitigação
+de emergência tem que aguentar exatamente esse tipo de rajada — muitos
+gatilhos de uma vez):
+
+- Sem uma trava de "já em andamento", a reconciliação redisparava revert pro
+  MESMO id a cada ciclo de 30s enquanto a reversão anterior (SSH síncrono pra
+  remover a exceção de PBR, serializado por equipamento) ainda estava
+  rodando. `expire_due` e `reconcile_with_flowguard` agora compartilham
+  `_revert_async` com um conjunto `_reverting_ids` em memória que pula o
+  disparo se já houver uma reversão em andamento pro mesmo id.
+- Pelo mesmo motivo, o REDISPARO em sinal contínuo (item 2 acima) também
+  duplicava: `apply_and_record` de um `src_ip` que já tinha um em andamento
+  ainda não tinha gravado a linha local (mesmo lock de PBR do equipamento
+  represando várias aplicações de uma vez), então `get_active_edge_mitigation`
+  não achava nada e `trigger_async` disparava OUTRA aplicação pro MESMO
+  `src_ip` — confirmado em produção criando até 7 regras FlowSpec duplicadas
+  (redundantes, não incorretas) pro mesmo cliente/vítima. `trigger_async`
+  ganhou a mesma proteção (`_applying_src_ips`), por `src_ip` em vez de por id
+  (aqui o que se quer deduplicar é "aplicar duas vezes pro mesmo cliente", não
+  um id específico que ainda nem existe).
+
+10 testes novos (209 no total). Validado em produção real (não só testes):
+reiniciei o `flowguard.service` (as duas vezes que causaram o gap, durante
+outra sessão de trabalho) e depois o `clientguard.service` com o fix — logs
+confirmaram as 20 mitigações órfãs sendo detectadas e revertidas
+corretamente, e sinais de scan contínuos sendo redisparados com mitigação de
+verdade nos ciclos seguintes. As duplicatas criadas antes da 2ª trava existir
+foram limpas manualmente via `flowguard-cli flowspec del` (mantendo só a mais
+recente por cliente) — o ClientGuard reconciliou sozinho os registros locais
+órfãos resultantes disso, confirmando o loop fechado reconciliação → redisparo
+funcionando ponta a ponta sob condição real de rajada, não só no caminho feliz.
 
 ### v1.20.0 — 2026-07-03 — Revisão do fix de PBR: 4 bugs reais na própria correção
 Revisão de código (5 frentes independentes) na correção v1.19.0 achou que a

@@ -2,7 +2,7 @@
 # cliente abusivo. auto_mitigate/default_ttl_s são editáveis pelo portal ou
 # clientguard-cli edge auto set; acl_number/apply_commands/revert_commands só
 # à mão aqui (ajuste pro ACL/sintaxe reais já aplicados na borda).
-warmode_device: ''
+warmode_device: NE8000BGP
 acl_number: 3999
 default_ttl_s: 21600
 apply_commands:

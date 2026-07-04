@@ -407,6 +407,41 @@ def revert_and_record(conn: sqlite3.Connection, db_lock, mitigation_id: int, fg_
     return {"ok": True, "already_inactive": True} if already_gone else resp
 
 
+# IDs de edge_mitigations com um revert_and_record em andamento (thread própria,
+# ver _revert_async) — evita disparar uma 2ª/3ª reversão pro MESMO id quando ele
+# ainda aparece 'active' num ciclo seguinte só porque a reversão anterior (pode
+# envolver SSH síncrono de vários segundos pra remover a exceção de PBR, serializado
+# por equipamento — ver push_pbr_bypass) ainda não terminou. Achado real: numa
+# reconciliação de 19 mitigações de uma vez, sem essa guarda o mesmo id era
+# redisparado a cada ciclo de 30s até a reversão original finalmente terminar,
+# multiplicando conexões SSH redundantes no roteador pro mesmo trabalho.
+_reverting_lock = threading.Lock()
+_reverting_ids: set[int] = set()
+
+
+def _revert_async(conn: sqlite3.Connection, db_lock, mitigation_id: int, fg_socket_path: str,
+                   cfg: dict | None, flowguard_path: str, thread_name: str, log_context: str) -> bool:
+    """Dispara revert_and_record em thread própria, só se não houver uma reversão
+    já em andamento pro mesmo id. Retorna True se disparou, False se pulou (já em
+    andamento) — quem chama usa isso pra não contar o mesmo id duas vezes."""
+    with _reverting_lock:
+        if mitigation_id in _reverting_ids:
+            return False
+        _reverting_ids.add(mitigation_id)
+
+    def _run() -> None:
+        try:
+            revert_and_record(conn, db_lock, mitigation_id, fg_socket_path, cfg, flowguard_path)
+        except Exception:
+            LOG.exception("falha ao reverter (%s) mitigação FlowSpec id=%s", log_context, mitigation_id)
+        finally:
+            with _reverting_lock:
+                _reverting_ids.discard(mitigation_id)
+
+    threading.Thread(target=_run, daemon=True, name=thread_name).start()
+    return True
+
+
 def expire_due(conn: sqlite3.Connection, db_lock, fg_socket_path: str, cfg: dict | None = None,
                 flowguard_path: str = "/root/flowguard") -> int:
     """Chamado periodicamente pelo loop do daemon — só processa mechanism='flowspec'
@@ -422,17 +457,74 @@ def expire_due(conn: sqlite3.Connection, db_lock, fg_socket_path: str, cfg: dict
     lock = db_lock or nullcontext()
     with lock:
         due = storage.list_due_edge_mitigations(conn, mechanism="flowspec")
+    dispatched = 0
     for row in due:
-        row_id = row["id"]
+        if _revert_async(conn, db_lock, row["id"], fg_socket_path, cfg, flowguard_path,
+                          "clientguard-flowspec-expire", "TTL vencido"):
+            dispatched += 1
+    return dispatched
 
-        def _run(mitigation_id=row_id) -> None:
-            try:
-                revert_and_record(conn, db_lock, mitigation_id, fg_socket_path, cfg, flowguard_path)
-            except Exception:
-                LOG.exception("falha ao reverter mitigação FlowSpec expirada id=%s", mitigation_id)
 
-        threading.Thread(target=_run, daemon=True, name="clientguard-flowspec-expire").start()
-    return len(due)
+def reconcile_with_flowguard(conn: sqlite3.Connection, db_lock, fg_socket_path: str,
+                              cfg: dict | None = None, flowguard_path: str = "/root/flowguard") -> int:
+    """Achado real de auditoria (2026-07-04): flowguard.service reiniciar retira
+    TODAS as regras FlowSpec/RTBH ativas da borda no shutdown gracioso
+    (BgpManager.withdraw_all) — sem avisar o ClientGuard. A mitigação segue
+    marcada 'active' aqui até seu próprio TTL local vencer (default_ttl_s, até
+    6h), fazendo o operador achar que um cliente abusivo está bloqueado quando
+    NADA está sendo filtrado na borda. Pior: apply_and_record só estende o TTL
+    local pra uma mitigação "já ativa" (nunca reanuncia), e um sinal que
+    continua aberto nunca re-dispara mitigação (ver detector._record_signal) —
+    sem isso, o gap não se autocorrige nem quando o cliente continua abusando.
+    Confirmado em produção: 20 mitigações sobreviveram a 2 restarts do
+    flowguard.service nesta sessão, 32 sinais de scan continuavam abertos pros
+    mesmos IPs, alguns escaneando na hora exata da auditoria.
+
+    Roda a cada ciclo de agregação (só faz round-trip ao FlowGuard se houver
+    pelo menos 1 mitigação flowspec 'active' aqui). Reaproveita
+    revert_and_record pra cada mitigação órfã encontrada — ele já trata "regra
+    já está inativa" como sucesso (não é falha, é uma corrida entre os dois
+    TTLs) e já cuida de limpar a exceção de PBR associada, mesma lógica usada
+    pela expiração normal por TTL; cada revert roda em thread própria pelo
+    mesmo motivo de expire_due (pode envolver SSH síncrono de vários segundos)."""
+    lock = db_lock or nullcontext()
+    with lock:
+        active_local = [r for r in storage.list_edge_mitigations(conn, active_only=True)
+                         if r["mechanism"] == "flowspec"]
+    if not active_local:
+        return 0
+
+    resp = control.send_command(fg_socket_path, {"cmd": "rules"})
+    if not resp.get("ok"):
+        LOG.error("reconciliação flowspec: falha ao consultar regras ativas do FlowGuard: %s", resp.get("error"))
+        return 0
+    active_fg_ids = {r["id"] for r in resp.get("rules", [])}
+
+    stale = [r for r in active_local if r["flowspec_rule_id"] not in active_fg_ids]
+    dispatched = 0
+    for row in stale:
+        if _revert_async(conn, db_lock, row["id"], fg_socket_path, cfg, flowguard_path,
+                          "clientguard-flowspec-reconcile", "reconciliação"):
+            LOG.warning(
+                "reconciliação: mitigação id=%s (src_ip=%s, flowspec_rule_id=%s) estava 'active' aqui mas "
+                "já não existe no FlowGuard — revertendo localmente pra refletir a realidade",
+                row["id"], row["src_ip"], row["flowspec_rule_id"],
+            )
+            dispatched += 1
+    return dispatched
+
+
+# src_ip com um apply_and_record em andamento (thread própria) — mesmo motivo de
+# _reverting_ids: push_pbr_bypass serializa SSH por equipamento (lock global), então
+# sob carga (muitos gatilhos de uma vez, ex. reconciliação em massa) o tempo entre
+# "FlowSpec anunciado" e "linha gravada em edge_mitigations" pode passar de um ciclo
+# de detecção inteiro. Achado real: sem essa guarda, o redisparo em sinal contínuo
+# (ver detector._record_signal) via get_active_edge_mitigation não encontrava nada
+# ainda (insert pendente) e disparava OUTRO apply_and_record pro MESMO src_ip a cada
+# ciclo de 30s — 6 regras FlowSpec duplicadas pro mesmo cliente/vítima em produção
+# antes dessa guarda existir.
+_applying_lock = threading.Lock()
+_applying_src_ips: set[str] = set()
 
 
 def trigger_async(conn: sqlite3.Connection, db_lock, src_ip: str, signal_id: int,
@@ -441,7 +533,13 @@ def trigger_async(conn: sqlite3.Connection, db_lock, src_ip: str, signal_id: int
                    flowguard_path: str = "/root/flowguard") -> None:
     """Dispara apply_and_record em thread separada — usado pelo gatilho automático dos
     detectores, que não pode travar o ciclo de agregação esperando o round-trip do
-    socket do FlowGuard."""
+    socket do FlowGuard. Não duplica se já houver uma aplicação em andamento pro
+    mesmo src_ip (ver _applying_src_ips)."""
+    with _applying_lock:
+        if src_ip in _applying_src_ips:
+            return
+        _applying_src_ips.add(src_ip)
+
     def _run() -> None:
         try:
             apply_and_record(conn, db_lock, src_ip, signal_id, signal_type, mitigation_match,
@@ -449,5 +547,8 @@ def trigger_async(conn: sqlite3.Connection, db_lock, src_ip: str, signal_id: int
                               baseline_min_samples, flowguard_path)
         except Exception:
             LOG.exception("falha ao aplicar mitigação FlowSpec automática para %s", src_ip)
+        finally:
+            with _applying_lock:
+                _applying_src_ips.discard(src_ip)
 
     threading.Thread(target=_run, daemon=True, name="clientguard-flowspec-auto").start()

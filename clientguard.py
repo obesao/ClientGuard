@@ -237,6 +237,16 @@ class ClientGuardDaemon:
             LOG.info("mitigação de borda: %d regra(s) revertida(s) por TTL vencido (%d ssh, %d flowspec)",
                       expired, expired_ssh, expired_flowspec)
 
+        # ver flowspec_mitigation.reconcile_with_flowguard: corrige mitigações
+        # marcadas 'active' aqui cuja regra já não existe mais no FlowGuard (ex:
+        # flowguard.service reiniciado sem avisar o ClientGuard) — sem isso o
+        # gap podia durar até default_ttl_s (6h) antes de se corrigir sozinho.
+        reconciled = flowspec_mitigation.reconcile_with_flowguard(
+            self.conn, self.db_lock, fg_socket_path, self.flowspec_mitigation_cfg, flowguard_path)
+        if reconciled:
+            LOG.warning("reconciliação: %d mitigação(ões) flowspec estavam 'ativas' localmente mas "
+                        "já não existiam no FlowGuard — corrigidas", reconciled)
+
         self._cycle_count += 1
         interval = self.config["database"]["aggregate_interval_s"]
         cycles_per_hour = max(1, int(3600 / interval))

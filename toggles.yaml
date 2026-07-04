@@ -6,6 +6,6 @@ scan_vertical: true
 amplifier: true
 spam: true
 malicious_contact: false
-coordinated_destination: true
+coordinated_destination: false
 dns_tunneling: true
 ai_explanations: true

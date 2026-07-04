@@ -30,10 +30,33 @@ def _record_signal(conn: sqlite3.Connection, src_ip: str, customer_prefix: str |
                     mitigation_match: dict = None) -> None:
     lock = db_lock or nullcontext()
     evidence_json = json.dumps(evidence, ensure_ascii=False)
+    mitigation_ctx = mitigation_ctx or {}
+    mitigation_action = mitigation_ctx.get("cfg", {}).get("auto_mitigate", {}).get(signal_type, "off")
     with lock:
         existing = storage.get_open_signal(conn, src_ip, signal_type)
         if existing:
             storage.touch_signal(conn, existing["id"], evidence_json)
+            # Achado real de auditoria: se o cliente continua abusando com o
+            # MESMO sinal ainda aberto, o código nunca chegava aqui de novo —
+            # apply_and_record só reforça/estende uma mitigação já 'active' (nunca
+            # reanuncia), então uma mitigação apagada por fora (ex: restart do
+            # flowguard.service, que retira TODAS as regras ativas no shutdown —
+            # ver BgpManager.withdraw_all) nunca era refeita enquanto o sinal
+            # seguisse aberto: até 6h de abuso contínuo sem qualquer bloqueio
+            # real, mesmo com auto_mitigate ligado. Só dispara de novo quando
+            # não há mitigação ativa AGORA — não é o caminho comum (a maioria
+            # dos ciclos aqui não tem nada pra fazer), só o reparo desse gap.
+            if mitigation_action in ("discard", "rate_limit"):
+                still_mitigated = storage.get_active_edge_mitigation(conn, src_ip) is not None
+                if not still_mitigated:
+                    LOG.warning("sinal %s em src_ip=%s continua aberto sem mitigação ativa — redisparando",
+                                signal_type, src_ip)
+                    flowspec_mitigation.trigger_async(
+                        conn, db_lock, src_ip, existing["id"], signal_type, mitigation_match,
+                        mitigation_ctx["cfg"], mitigation_ctx["fg_socket_path"],
+                        mitigation_ctx.get("baseline_min_samples", 120),
+                        mitigation_ctx.get("flowguard_path", "/root/flowguard"),
+                    )
             return
         signal_id = storage.insert_suspicious_client(conn, {
             "src_ip": src_ip, "customer_prefix": customer_prefix, "signal_type": signal_type,
@@ -42,8 +65,6 @@ def _record_signal(conn: sqlite3.Connection, src_ip: str, customer_prefix: str |
     LOG.warning("sinal novo: %s src_ip=%s prefix=%s evidencia=%s",
                 signal_type, src_ip, customer_prefix, evidence_json)
 
-    mitigation_ctx = mitigation_ctx or {}
-    mitigation_action = mitigation_ctx.get("cfg", {}).get("auto_mitigate", {}).get(signal_type, "off")
     if mitigation_action in ("discard", "rate_limit"):
         flowspec_mitigation.trigger_async(
             conn, db_lock, src_ip, signal_id, signal_type, mitigation_match,
