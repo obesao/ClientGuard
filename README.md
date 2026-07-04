@@ -119,8 +119,8 @@ FlowGuard v1.25.0, que introduziu a coluna). Agora o payload de
 
 `clientguard-cli edge list`/`block list` ganharam colunas Mecanismo/
 Equipamento/Gatilho. 6 testes novos (221 no total). Validado em produção
-real: uma mitigação automática nova gravou `trigger_type='auto'` e
-`device_name='HUAWEI-PPPOE-222'` corretamente do lado do FlowGuard,
+real: uma mitigação automática nova gravou `trigger_type='auto'` e o nome
+correto do peer PPPoE/CGNAT como `device_name` do lado do FlowGuard,
 confirmado direto no socket.
 
 ### v1.22.0 — 2026-07-04 — Selo de mitigação na aba Sinais Suspeitos
