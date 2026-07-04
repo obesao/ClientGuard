@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.21.0**
+**Versão atual: v1.22.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,25 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.22.0 — 2026-07-04 — Selo de mitigação na aba Sinais Suspeitos
+Pedido do usuário: sinalizar, na aba Sinais Suspeitos do ClientGuard, se
+aquele `src_ip` já participa de alguma mitigação e se ela está em vigor agora
+— sem precisar ir na aba Regras conferir cruzado. Nova `storage.
+get_latest_edge_mitigation(conn, src_ip)` (diferente de
+`get_active_edge_mitigation`, que só olha `status='active'` e é usada pra
+decidir se dispara mitigação nova): pega a mitigação MAIS RECENTE desse
+`src_ip` independente do status, pra distinguir "nunca foi mitigado" de "já
+foi mitigado, mas não está mais em vigor" — essa segunda situação é
+exatamente o gap que a reconciliação da v1.21.0 existe pra corrigir, então
+vale a pena o operador ver isso destacado. `_cmd_suspicious` (socket) enriquece
+cada sinal com `mitigation: {status, mechanism, trigger_type, ts_applied,
+ts_expires} | null`. `flowguard-cli suspicious` ganhou coluna "Mitigação"
+(🛡 ativa / falhou / encerrada / sem mitigação).
+
+7 testes novos (216 no total). Validado contra o daemon real via socket
+direto (`control.send_command`) — confirmado o campo `mitigation` populado
+corretamente pra clientes com mitigação ativa.
 
 ### v1.21.0 — 2026-07-04 — Corrige mitigações "fantasma": reconciliação com o FlowGuard + redisparo em sinal contínuo
 Pedido do usuário: auditar as mitigações ativas do ClientGuard pra saber se

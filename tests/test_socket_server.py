@@ -325,3 +325,47 @@ def test_status_reports_total_rows_from_memory_not_a_query(server):
 def test_dispatch_unknown_command(server):
     resp = server.dispatch({"cmd": "isso_nao_existe"})
     assert resp["ok"] is False
+
+
+# --- suspicious: sinaliza se o cliente já participa de alguma mitigação -----
+# (pedido do usuário: aba Sinais Suspeitos do portal precisa mostrar se aquele
+# src_ip já está/esteve numa regra de mitigação, e se ainda está em vigor)
+
+def test_suspicious_reports_no_mitigation_when_never_mitigated(server, conn):
+    storage.insert_suspicious_client(conn, {"src_ip": "1.2.3.4", "signal_type": "port_scan_horizontal"})
+    resp = server.dispatch({"cmd": "suspicious"})
+    assert resp["ok"] is True
+    assert resp["suspicious"][0]["mitigation"] is None
+
+
+def test_suspicious_reports_active_mitigation(server, conn):
+    storage.insert_suspicious_client(conn, {"src_ip": "1.2.3.4", "signal_type": "port_scan_horizontal"})
+    storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "auto",
+                                    mechanism="flowspec", flowspec_rule_id=42)
+    resp = server.dispatch({"cmd": "suspicious"})
+    mitigation = resp["suspicious"][0]["mitigation"]
+    assert mitigation["status"] == "active"
+    assert mitigation["mechanism"] == "flowspec"
+    assert mitigation["trigger_type"] == "auto"
+
+
+def test_suspicious_reports_latest_mitigation_even_when_reverted(server, conn):
+    # achado real de auditoria: um cliente pode ter sido mitigado e a regra ter
+    # saído do ar (TTL, ou reconciliação achando que sumiu do FlowGuard) — a aba
+    # precisa mostrar "já foi mitigado, mas não está mais em vigor", não "nunca
+    # foi mitigado" (get_latest_edge_mitigation, não get_active_edge_mitigation).
+    storage.insert_suspicious_client(conn, {"src_ip": "1.2.3.4", "signal_type": "port_scan_horizontal"})
+    mitigation_id = storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "auto",
+                                                     mechanism="flowspec", flowspec_rule_id=42)
+    storage.mark_edge_reverted(conn, mitigation_id)
+    resp = server.dispatch({"cmd": "suspicious"})
+    mitigation = resp["suspicious"][0]["mitigation"]
+    assert mitigation["status"] == "reverted"
+
+
+def test_suspicious_only_matches_mitigation_by_same_src_ip(server, conn):
+    storage.insert_suspicious_client(conn, {"src_ip": "1.2.3.4", "signal_type": "port_scan_horizontal"})
+    storage.insert_edge_mitigation(conn, "5.6.7.8", None, 3600, "auto",
+                                    mechanism="flowspec", flowspec_rule_id=42)
+    resp = server.dispatch({"cmd": "suspicious"})
+    assert resp["suspicious"][0]["mitigation"] is None

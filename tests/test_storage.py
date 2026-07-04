@@ -272,3 +272,21 @@ def test_list_due_edge_mitigations_filters_by_mechanism(conn):
     assert {r["src_ip"] for r in due_flowspec} == {"1.2.3.4"}
     due_all = storage.list_due_edge_mitigations(conn)
     assert {r["src_ip"] for r in due_all} == {"1.2.3.4", "5.6.7.8"}
+
+
+def test_get_latest_edge_mitigation_returns_none_when_never_mitigated(conn):
+    assert storage.get_latest_edge_mitigation(conn, "1.2.3.4") is None
+
+
+def test_get_latest_edge_mitigation_returns_most_recent_regardless_of_status(conn):
+    first_id = storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "auto", mechanism="flowspec")
+    storage.mark_edge_reverted(conn, first_id)
+    second_id = storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "auto", mechanism="ssh")
+    latest = storage.get_latest_edge_mitigation(conn, "1.2.3.4")
+    assert latest["id"] == second_id
+    assert latest["status"] == "active"
+
+
+def test_get_latest_edge_mitigation_scoped_by_src_ip(conn):
+    storage.insert_edge_mitigation(conn, "5.6.7.8", None, 3600, "auto", mechanism="ssh")
+    assert storage.get_latest_edge_mitigation(conn, "1.2.3.4") is None

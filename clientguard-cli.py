@@ -166,6 +166,20 @@ def cmd_top(args: argparse.Namespace, sock_path: str) -> None:
         console.print(table)
 
 
+_MITIGATION_MECHANISM_LABELS = {"flowspec": "FlowSpec", "ssh": "SSH/ACL"}
+
+
+def _fmt_mitigation_cell(mitigation: dict | None) -> str:
+    if not mitigation:
+        return "[dim]sem mitigação[/dim]"
+    mechanism = _MITIGATION_MECHANISM_LABELS.get(mitigation["mechanism"], mitigation["mechanism"])
+    if mitigation["status"] == "active":
+        return f"[green]🛡 ativa ({mechanism})[/green]"
+    if mitigation["status"] == "failed":
+        return f"[red]falhou ({mechanism})[/red]"
+    return f"[dim]encerrada ({mechanism})[/dim]"  # reverted (TTL vencido, manual, ou reconciliação)
+
+
 def cmd_suspicious(args: argparse.Namespace, sock_path: str) -> None:
     resp = send_command(sock_path, {"cmd": "suspicious", "history": args.history, "since_s": args.since_s})
     die_on_error(resp)
@@ -178,11 +192,13 @@ def cmd_suspicious(args: argparse.Namespace, sock_path: str) -> None:
     table.add_column("Confiança", justify="right")
     table.add_column("Detectado em")
     table.add_column("Última vez")
+    table.add_column("Mitigação")
     for row in resp["suspicious"]:
         table.add_row(
             str(row["id"]), row["src_ip"], row["customer_prefix"] or "-",
             SIGNAL_LABELS.get(row["signal_type"], row["signal_type"]),
             f"{(row['confidence'] or 0) * 100:.0f}%", fmt_ts(row["ts_detected"]), fmt_ts(row["ts_last_seen"]),
+            _fmt_mitigation_cell(row.get("mitigation")),
         )
     if not resp["suspicious"]:
         console.print(f"[green]{title}: nenhum registro.[/green]")

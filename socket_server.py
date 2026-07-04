@@ -178,6 +178,20 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         since_s = int(request.get("since_s", 86400))
         with self._read_conn() as rconn:
             items = storage.list_suspicious_clients(rconn, resolved=resolved, since_s=since_s)
+            # "esse cliente já participa de alguma mitigação, e está em vigor
+            # agora?" — pedido do usuário na aba Sinais Suspeitos do portal.
+            # Última mitigação (qualquer status), não só a ativa: sinaliza tanto
+            # "mitigado agora" quanto "já teve mitigação, mas não está mais em
+            # vigor" (achado real de auditoria: essa segunda situação é
+            # exatamente o gap que a reconciliação com o FlowGuard existe pra
+            # corrigir — ver flowspec_mitigation.reconcile_with_flowguard).
+            for item in items:
+                mitigation = storage.get_latest_edge_mitigation(rconn, item["src_ip"])
+                item["mitigation"] = {
+                    "status": mitigation["status"], "mechanism": mitigation["mechanism"],
+                    "trigger_type": mitigation["trigger_type"], "ts_applied": mitigation["ts_applied"],
+                    "ts_expires": mitigation["ts_expires"],
+                } if mitigation else None
         return {"ok": True, "suspicious": items}
 
     def _cmd_resolve(self, request: dict) -> dict:

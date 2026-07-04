@@ -400,6 +400,19 @@ def get_active_edge_mitigation(conn: sqlite3.Connection, src_ip: str) -> dict | 
     return dict(row) if row else None
 
 
+def get_latest_edge_mitigation(conn: sqlite3.Connection, src_ip: str) -> dict | None:
+    """Última mitigação (qualquer status — active/reverted/failed) desse src_ip,
+    independente de estar em vigor agora ou não. Usado pela aba Sinais Suspeitos
+    do portal pra mostrar "esse cliente já foi/está mitigado?" — diferente de
+    get_active_edge_mitigation (só active), que é o usado pra decidir se dispara
+    uma mitigação nova."""
+    row = conn.execute(
+        "SELECT * FROM edge_mitigations WHERE src_ip = ? ORDER BY id DESC LIMIT 1",
+        (src_ip,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def get_edge_mitigation(conn: sqlite3.Connection, mitigation_id: int) -> dict | None:
     row = conn.execute("SELECT * FROM edge_mitigations WHERE id = ?", (mitigation_id,)).fetchone()
     return dict(row) if row else None
