@@ -373,8 +373,15 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         if not resp.get("ok"):
             return resp
         # só regras de bloqueio por origem (discard/rate-limit) — RTBH é o
-        # mecanismo de proteção de vítima do FlowGuard, não bloqueio de cliente
-        blocks = [r for r in resp.get("rules", []) if r.get("src_prefix") and r.get("action") != "rtbh"]
+        # mecanismo de proteção de vítima do FlowGuard, não bloqueio de cliente.
+        # Bug real corrigido aqui: faltava filtrar por origin=="clientguard" —
+        # sem isso, a lista misturava bloqueios manuais do FlowGuard e mitigações
+        # automáticas do próprio ClientGuard (port_scan etc.) junto com bloqueios
+        # manuais de cliente, todos com o mesmo rótulo "bloqueio".
+        blocks = [
+            r for r in resp.get("rules", [])
+            if r.get("src_prefix") and r.get("action") != "rtbh" and r.get("origin") == "clientguard"
+        ]
         return {"ok": True, "blocks": blocks}
 
     # --- mitigação direta na borda (SSH/ACL), sem depender do FlowGuard ------
@@ -445,6 +452,17 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
     def _cmd_edge_list(self, request: dict) -> dict:
         with self._read_conn() as rconn:
             items = storage.list_edge_mitigations(rconn, active_only=bool(request.get("active_only", False)))
+        # pedido do usuário: aba Regras mostrar em qual equipamento cada mitigação
+        # está sendo aplicada. mechanism='ssh' usa sempre o mesmo equipamento
+        # (edge_mitigation.yaml.warmode_device, único ACL global); mechanism=
+        # 'flowspec' sempre vai pro peer 'pppoe' do FlowGuard (achado real de bug
+        # já documentado em flowspec_mitigation.py) — reaproveita o nome já
+        # configurado em flowspec_mitigation.yaml.pbr_bypass.warmode_device, sem
+        # precisar duplicar config nem perguntar ao FlowGuard.
+        ssh_device = self.daemon_ref.edge_cfg.get("warmode_device", "")
+        flowspec_device = self.daemon_ref.flowspec_mitigation_cfg.get("pbr_bypass", {}).get("warmode_device", "")
+        for item in items:
+            item["device_name"] = ssh_device if item["mechanism"] == "ssh" else (flowspec_device or "pppoe")
         return {"ok": True, "mitigations": items}
 
     def _cmd_edge_config(self, request: dict) -> dict:

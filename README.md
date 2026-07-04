@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.22.0**
+**Versão atual: v1.23.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,31 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.23.0 — 2026-07-04 — Repassa trigger_type pro FlowGuard + equipamento na aba Regras
+Pedido do usuário: aba Regras sinalizar mecanismo/equipamento/gatilho/status
+em toda mitigação em andamento, tanto do ClientGuard quanto do FlowSpec —
+mesmo padrão da aba Sinais Suspeitos (v1.22.0). O ClientGuard já tinha toda
+essa informação em `edge_mitigations` (`mechanism`/`trigger_type`/`status`);
+faltava só o **equipamento**, que agora `_cmd_edge_list` resolve por
+mecanismo: `mechanism='ssh'` usa `edge_mitigation.yaml.warmode_device`
+(único ACL global); `mechanism='flowspec'` sempre vai pro peer `pppoe` do
+FlowGuard (achado real de bug já documentado), reaproveitando o nome já
+configurado em `flowspec_mitigation.yaml.pbr_bypass.warmode_device` — sem
+duplicar config nem perguntar ao FlowGuard.
+
+**Achado real**: `apply_and_record` (mitigação automática via proxy FlowSpec)
+já sabia se a mitigação era `'auto'` (é o próprio parâmetro `trigger_type`
+que ele recebe), mas nunca repassava isso pro FlowGuard — toda regra
+automática do ClientGuard gravava `trigger_type='manual'` do lado de lá (ver
+FlowGuard v1.25.0, que introduziu a coluna). Agora o payload de
+`flowspec_add` inclui `"trigger_type": trigger_type`.
+
+`clientguard-cli edge list`/`block list` ganharam colunas Mecanismo/
+Equipamento/Gatilho. 6 testes novos (221 no total). Validado em produção
+real: uma mitigação automática nova gravou `trigger_type='auto'` e
+`device_name='HUAWEI-PPPOE-222'` corretamente do lado do FlowGuard,
+confirmado direto no socket.
 
 ### v1.22.0 — 2026-07-04 — Selo de mitigação na aba Sinais Suspeitos
 Pedido do usuário: sinalizar, na aba Sinais Suspeitos do ClientGuard, se

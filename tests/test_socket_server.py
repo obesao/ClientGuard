@@ -153,9 +153,24 @@ def test_block_del_removes_pbr_bypass_when_enabled(server):
 
 def test_block_list_filters_out_rtbh(server):
     rules = [
-        {"id": 1, "src_prefix": "1.2.3.4/32", "action": "discard"},
-        {"id": 2, "src_prefix": None, "action": "rtbh"},
-        {"id": 3, "src_prefix": "5.6.7.8/32", "action": "rtbh"},
+        {"id": 1, "src_prefix": "1.2.3.4/32", "action": "discard", "origin": "clientguard"},
+        {"id": 2, "src_prefix": None, "action": "rtbh", "origin": "clientguard"},
+        {"id": 3, "src_prefix": "5.6.7.8/32", "action": "rtbh", "origin": "clientguard"},
+    ]
+    with patch("control.send_command", return_value={"ok": True, "rules": rules}):
+        resp = server.dispatch({"cmd": "block_list"})
+    assert resp["ok"] is True
+    assert [b["id"] for b in resp["blocks"]] == [1]
+
+
+def test_block_list_filters_out_other_origins(server):
+    # bug real: sem filtrar por origin, bloqueios manuais do FlowGuard e
+    # mitigações automáticas do próprio ClientGuard (que não são "bloqueio
+    # manual de cliente") apareciam juntos nesta lista.
+    rules = [
+        {"id": 1, "src_prefix": "1.2.3.4/32", "action": "discard", "origin": "clientguard"},
+        {"id": 2, "src_prefix": "9.9.9.9/32", "action": "discard", "origin": "flowguard"},
+        {"id": 3, "src_prefix": "8.8.8.8/32", "action": "discard"},
     ]
     with patch("control.send_command", return_value={"ok": True, "rules": rules}):
         resp = server.dispatch({"cmd": "block_list"})
@@ -281,6 +296,28 @@ def test_edge_list_active_only(server, conn):
     assert resp["ok"] is True
     assert len(resp["mitigations"]) == 1
     assert resp["mitigations"][0]["src_ip"] == "1.2.3.4"
+
+
+# --- edge_list: device_name (pedido do usuário — em qual equipamento) ------
+
+def test_edge_list_ssh_mechanism_uses_warmode_device(server, conn):
+    storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "manual", mechanism="ssh")
+    resp = server.dispatch({"cmd": "edge_list"})
+    assert resp["mitigations"][0]["device_name"] == server.daemon_ref.edge_cfg["warmode_device"]
+
+
+def test_edge_list_flowspec_mechanism_uses_pbr_bypass_device(server, conn):
+    server.daemon_ref.flowspec_mitigation_cfg["pbr_bypass"] = {"warmode_device": "HUAWEI-PPPOE-222"}
+    storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "auto", mechanism="flowspec", flowspec_rule_id=1)
+    resp = server.dispatch({"cmd": "edge_list"})
+    assert resp["mitigations"][0]["device_name"] == "HUAWEI-PPPOE-222"
+
+
+def test_edge_list_flowspec_device_name_falls_back_to_pppoe_when_unconfigured(server, conn):
+    server.daemon_ref.flowspec_mitigation_cfg["pbr_bypass"] = {}  # sem warmode_device
+    storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "auto", mechanism="flowspec", flowspec_rule_id=1)
+    resp = server.dispatch({"cmd": "edge_list"})
+    assert resp["mitigations"][0]["device_name"] == "pppoe"
 
 
 def test_edge_config_never_exposes_credentials(server):

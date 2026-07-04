@@ -321,6 +321,7 @@ def apply_and_record(conn: sqlite3.Connection, db_lock, src_ip: str, signal_id: 
 
     resp = control.send_command(fg_socket_path, {
         "cmd": "flowspec_add", "rule": rule, "ttl_s": ttl_s, "origin": "clientguard", "peer": "pppoe",
+        "trigger_type": trigger_type,
     })
     rate_limit_bps = int(rule["action"].split(":", 1)[1]) if rule["action"].startswith("rate-limit:") else None
 

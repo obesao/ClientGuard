@@ -190,6 +190,18 @@ def test_apply_and_record_calls_flowspec_add_and_records_row(conn):
     assert row["rate_limit_bps"] is None
 
 
+def test_apply_and_record_forwards_trigger_type_to_flowguard(conn):
+    # pedido do usuário: aba Regras precisa saber se a regra no FlowGuard foi
+    # automática ou manual — sem isso, flowspec_rules.trigger_type sempre caía
+    # no default 'manual' de lá, mesmo pra mitigação automática do ClientGuard.
+    cfg = _cfg()
+    with patch("control.send_command", return_value={"ok": True, "rule_id": 1}) as mock:
+        fm.apply_and_record(conn, None, "1.2.3.4", None, "port_scan_horizontal", None,
+                             3600, "auto", cfg, "/fake.sock")
+    payload = mock.call_args.args[1]
+    assert payload["trigger_type"] == "auto"
+
+
 def test_apply_and_record_off_action_skips_without_calling_socket(conn):
     cfg = _cfg()
     with patch("control.send_command") as mock:

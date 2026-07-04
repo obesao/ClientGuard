@@ -275,11 +275,15 @@ def cmd_block_list(args: argparse.Namespace, sock_path: str) -> None:
     table.add_column("ID")
     table.add_column("Origem bloqueada")
     table.add_column("Ação")
+    table.add_column("Equipamento")
+    table.add_column("Gatilho")
     table.add_column("Expira em")
     now = time.time()
     for row in resp["blocks"]:
         ttl = max(0, int(row["expires_at"] - now))
-        table.add_row(str(row["id"]), row["src_prefix"], row["action"], f"{ttl}s")
+        trigger = "automático" if row.get("trigger_type") == "auto" else "manual"
+        table.add_row(str(row["id"]), row["src_prefix"], row["action"], row.get("device_name") or "-",
+                      trigger, f"{ttl}s")
     if not resp["blocks"]:
         console.print("[green]Nenhum IP bloqueado no momento.[/green]")
     else:
@@ -305,17 +309,21 @@ def cmd_edge_revert(args: argparse.Namespace, sock_path: str) -> None:
 def cmd_edge_list(args: argparse.Namespace, sock_path: str) -> None:
     resp = send_command(sock_path, {"cmd": "edge_list", "active_only": args.active_only})
     die_on_error(resp)
-    table = Table(title="Mitigações Diretas na Borda (SSH/ACL)")
+    table = Table(title="Mitigações Diretas na Borda (SSH/ACL + FlowSpec)")
     table.add_column("ID")
     table.add_column("src_ip")
+    table.add_column("Mecanismo")
+    table.add_column("Equipamento")
     table.add_column("Status")
     table.add_column("Gatilho")
     table.add_column("Aplicada em")
     table.add_column("Expira em")
     now = time.time()
+    _mechanism_labels = {"ssh": "SSH/ACL", "flowspec": "FlowSpec"}
     for row in resp["mitigations"]:
         ttl = f"{max(0, int(row['ts_expires'] - now))}s" if row.get("ts_expires") else "sem TTL"
-        table.add_row(str(row["id"]), row["src_ip"], row["status"], row["trigger_type"],
+        table.add_row(str(row["id"]), row["src_ip"], _mechanism_labels.get(row["mechanism"], row["mechanism"]),
+                      row.get("device_name") or "-", row["status"], row["trigger_type"],
                       fmt_ts(row["ts_applied"]), ttl if row["status"] == "active" else "-")
     if not resp["mitigations"]:
         console.print("[green]Nenhuma mitigação de borda registrada.[/green]")
