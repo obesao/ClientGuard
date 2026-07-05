@@ -87,8 +87,25 @@ dns_baseline:
   stale_days: 14
 
 detection:
-  scan_horizontal_hosts: 30      # N destinos distintos, mesma porta, pra contar como scan horizontal
-  scan_vertical_ports: 30        # N portas distintas, mesmo destino, pra contar como scan vertical
+  # Recalibrado 2026-07-05 com base em monitoramento real de flow (12h, prefixo
+  # CGNAT-PPPOE 100.64.0.0/10, que concentra a maior diversidade de apps de cliente
+  # residencial): com o limiar antigo (30), p99 de scan_vertical já era 37 e p99 de
+  # scan_horizontal (fora ICMP/portas comuns) era 234 — ou seja, 30 capturava tráfego
+  # normal, não abuso. BitTorrent (porta 6881/UDP) sozinho gera até ~600 hosts
+  # distintos por cliente; jogos/relay P2P (múltiplos destinos observados, ex.
+  # 27.124.18.114/115, 91.134.216.106) empurram scan_vertical pra 50-250 portas no
+  # mesmo destino rotineiramente. Novos limiares ficam acima do p99.5 observado —
+  # ainda capturam os casos claramente anômalos confirmados nos dados reais (scan de
+  # SSH porta 22 com 403 hosts distintos, por exemplo).
+  # IMPORTANTE (achado da auditoria): 100.64.0.0/10 é o pool CGNAT-PPPOE, mas o
+  # NetFlow captura o IP PRÉ-NAT (1 IP = 1 sessão PPPoE = ~1 cliente real) — não é
+  # o caso "1 IP público = N clientes combinados" que justificaria client_multiplier
+  # em customers.yaml (esse continua reservado pra pools pós-NAT tipo CGNAT-B20/B21,
+  # onde 1 IP público visível pode ser até 32 clientes reais). O volume alto aqui é
+  # de apps legítimas de alto fan-out, não população combinada — daí a correção ser
+  # nos limiares, não num multiplicador novo.
+  scan_horizontal_hosts: 250     # N destinos distintos, mesma porta, pra contar como scan horizontal
+  scan_vertical_ports: 300       # N portas distintas, mesmo destino, pra contar como scan vertical
   # tráfego P2P/torrent também bate muitos hosts/portas distintos, mas com volume real de
   # dados por destino — scan de reconhecimento de verdade manda pacotes pequenos de sonda
   # (às vezes só um SYN). 10000 (10 KB) de média por destino/porta separa os dois casos;
@@ -109,8 +126,11 @@ detection:
   # detectores flagravam a maioria dos clientes ativos só por navegarem/usarem apps
   # normalmente (visto em produção: ~1250 sinais abertos de ~1300, quase todo falso
   # positivo, antes desse ajuste). 4500=IPsec NAT-T (VPN) — mesmo padrão, vários clientes
-  # no mesmo concentrador de VPN corporativa/comercial.
-  common_service_ports: [53, 80, 123, 443, 853, 3478, 4500, 5222, 5223, 5228]
+  # no mesmo concentrador de VPN corporativa/comercial. Adicionados 2026-07-05, mesmo
+  # monitoramento de flow acima: 993=IMAPS (clientes de e-mail variados), 6881=BitTorrent
+  # (peer discovery bate muitos hosts por natureza), 51820=WireGuard (VPN pessoal comum),
+  # 5349=TURN sobre TLS (WebRTC), 19132=Minecraft Bedrock (multiplayer), 64738=Mumble (voz).
+  common_service_ports: [53, 80, 123, 443, 853, 993, 3478, 4500, 5222, 5223, 5228, 5349, 6881, 19132, 51820, 64738]
   # pacotes DNS (udp/53) pro mesmo resolver na janela, JÁ multiplicado pelo sampling_rate
   # (real_packets = packets * sampling_rate, igual usado em amplifier_min_bps) — com
   # sampling_rate=1000, isso equivale a exigir ~20 pacotes amostrados na origem pra esse

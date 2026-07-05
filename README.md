@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.26.1**
+**Versão atual: v1.27.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,45 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.27.0 — 2026-07-05 — Recalibra limiares de scan com base em monitoramento real de flow
+Pedido do usuário: monitorar o consumo real via flow pra reajustar os limiares
+de regra sem risco de bloquear por engano, considerando as redes CGNAT.
+
+**Achado principal**: os limiares antigos (30 hosts/portas) foram pensados pra
+"1 cliente = poucos destinos", mas tráfego legítimo de app moderno rotineiramente
+ultrapassa isso. Monitorando 12h de flow real do prefixo CGNAT-PPPOE
+(100.64.0.0/10, maior diversidade de app residencial): p99 de scan_vertical já
+era 37 portas, p99 de scan_horizontal (fora ICMP/portas comuns) era 234 hosts —
+ou seja, o limiar de 30 capturava tráfego normal, não abuso. BitTorrent sozinho
+gera até ~600 hosts distintos por cliente; jogos/relay P2P empurram
+scan_vertical pra 50-250+ portas no mesmo destino rotineiramente.
+
+**Sobre CGNAT especificamente** (o usuário pediu pra lembrar dessas redes):
+confirmado que `100.64.0.0/10` (CGNAT-PPPOE) **não precisa de `client_multiplier`**
+— o NetFlow captura o IP PRÉ-NAT (1 IP = 1 sessão PPPoE ≈ 1 cliente real), bem
+diferente do caso `CGNAT-B20`/`CGNAT-B21` (multiplier=32, IP PÓS-NAT visível
+pode ser até 32 clientes reais combinados). O volume alto observado é de apps
+legítimas de alto fan-out, não população combinada — por isso a correção foi
+nos limiares base, não num multiplicador novo.
+
+Mudanças:
+- `scan_horizontal_hosts`: 30 → 250; `scan_vertical_ports`: 30 → 300 (acima do
+  p99.5 observado, ainda capturam os casos claramente anômalos confirmados nos
+  dados reais — ex. varredura de SSH porta 22 com 403 hosts distintos).
+- `common_service_ports` ganha 993 (IMAPS), 6881 (BitTorrent), 51820
+  (WireGuard), 5349 (TURN/TLS), 19132 (Minecraft Bedrock), 64738 (Mumble) —
+  todos confirmados nos dados reais como causa de falso positivo em massa.
+- `detect_scan_horizontal`/`detect_scan_vertical` passam a excluir protocol=1
+  (ICMP): o campo "porta" gravado pro ICMP é um artefato do NetFlow (type/code),
+  não uma porta de verdade — gerava dst_port como 0/771/2048 com milhares de
+  hosts distintos (praticamente todo cliente gera ICMP variado) sem relação
+  com scan. Detecção de ping sweep de verdade ficaria pra um detector dedicado,
+  fora de escopo aqui.
+
+Aplicado com restart do daemon (limiares vêm de `config.yaml`, só lido na
+inicialização — `reload` não cobre essa seção). 2 testes novos confirmando a
+exclusão de ICMP nos dois detectores; suíte completa sem regressão.
 
 ### v1.26.1 — 2026-07-05 — Sobe orçamento de regras FlowSpec do ClientGuard (20 → 30)
 Decisão operacional após a auditoria da v1.26.0 (1189 ocorrências reais do

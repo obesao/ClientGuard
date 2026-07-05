@@ -113,6 +113,17 @@ def test_scan_horizontal_still_triggers_on_low_volume_probes(conn):
     assert "port_scan_horizontal" in signal_types(conn)
 
 
+def test_scan_horizontal_ignores_icmp(conn):
+    # achado real monitorando flow de produção: protocol=1 (ICMP) não tem porta de
+    # verdade — o "dst_port" gravado é um artefato do NetFlow (type/code), não uma
+    # porta. Praticamente todo cliente gera ICMP variado (traceroute, MTU discovery,
+    # unreachable) que batia esse limiar sem ser scan de verdade.
+    for i in range(30):
+        insert_flow(conn, "177.86.19.20", f"45.10.{i}.1", 771, protocol=1)
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=30, whitelist=set())
+    assert not open_signals(conn)
+
+
 # --- scan vertical -----------------------------------------------------------
 
 def test_scan_vertical_triggers_above_threshold(conn):
@@ -151,6 +162,14 @@ def test_scan_vertical_still_triggers_on_low_volume_probes(conn):
         insert_flow(conn, "177.86.19.7", "45.20.30.41", 1 + port, protocol=6, bytes_=60)
     detector.detect_scan_vertical(conn, WINDOW_S, threshold=30, whitelist=set(), max_avg_bytes=10_000)
     assert "port_scan_vertical" in signal_types(conn)
+
+
+def test_scan_vertical_ignores_icmp(conn):
+    # mesmo motivo do horizontal: protocol=1 (ICMP) não tem porta de verdade
+    for port in range(30):
+        insert_flow(conn, "177.86.19.21", "45.20.30.42", 1 + port, protocol=1)
+    detector.detect_scan_vertical(conn, WINDOW_S, threshold=30, whitelist=set())
+    assert not open_signals(conn)
 
 
 # --- amplificador hospedado ---------------------------------------------------

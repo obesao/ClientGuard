@@ -146,9 +146,15 @@ def detect_scan_horizontal(conn: sqlite3.Connection, window_s: int, threshold: i
     multipliers = multipliers or {}
     lock = db_lock or nullcontext()
     since = int(time.time()) - window_s
+    # protocol=1 (ICMP) não tem porta de verdade — o "dst_port" gravado pro flow ICMP é
+    # um artefato (type/code do NetFlow), não uma porta real. Achado real monitorando
+    # tráfego de produção: isso gerava dst_port como 0/771/2048 etc. com milhares de
+    # hosts distintos (praticamente todo cliente gera ICMP variado — traceroute, MTU
+    # discovery, unreachable) sem relação nenhuma com scan de verdade. Detecção de
+    # varredura ICMP de verdade (ping sweep) precisaria de lógica própria, não esta.
     query = """SELECT src_ip, customer_prefix, dst_port, protocol, COUNT(DISTINCT dst_ip) AS n_hosts,
                       SUM(bytes) AS total_bytes
-               FROM client_flow_aggs WHERE ts >= ?"""
+               FROM client_flow_aggs WHERE ts >= ? AND protocol != 1"""
     params: list = [since]
     if exclude_ports:
         query += f" AND dst_port NOT IN ({','.join('?' * len(exclude_ports))})"
@@ -195,10 +201,12 @@ def detect_scan_vertical(conn: sqlite3.Connection, window_s: int, threshold: int
     lock = db_lock or nullcontext()
     since = int(time.time()) - window_s
     with lock:
+        # protocol != 1: mesmo motivo do detect_scan_horizontal — ICMP não tem porta
+        # de verdade, o campo é um artefato do NetFlow (type/code), não uma porta.
         rows = conn.execute(
             """SELECT src_ip, customer_prefix, dst_ip, COUNT(DISTINCT dst_port) AS n_ports,
                       SUM(bytes) AS total_bytes
-               FROM client_flow_aggs WHERE ts >= ?
+               FROM client_flow_aggs WHERE ts >= ? AND protocol != 1
                GROUP BY src_ip, dst_ip HAVING n_ports >= ?""",
             (since, threshold),
         ).fetchall()
