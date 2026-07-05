@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.24.0**
+**Versão atual: v1.25.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,22 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.25.0 — 2026-07-04 — Indicador "atividade recente" no CLI (suspicious)
+Pedido do usuário: "aberto" sozinho não diz se o sinal está REALMENTE
+acontecendo agora — validado ao vivo logo após a v1.24.0: a maioria dos
+sinais abertos já estava sem reconfirmação há minutos, ainda dentro da janela
+de 6h que os deixa "abertos" (rede de segurança da v1.24.0). Faltava uma
+forma rápida de diferenciar isso a olho.
+
+`clientguard-cli suspicious` ganha a coluna "Atividade", calculada a partir
+de `ts_last_seen` (já existente): 🟢 "em andamento" quando a última
+reconfirmação foi há menos de 90s (~3 ciclos de agregação de 30s, com
+folga), senão 🟡 "sem atividade há Xm/Xh". Só exibido pra sinais ainda
+abertos — resolvidos mostram "-".
+
+Puramente de exibição no CLI, nenhuma mudança de schema/backend. Contraparte
+no portal e no FlowGuard entram em commits próprios.
 
 ### v1.24.0 — 2026-07-04 — Sinal suspeito não fica "aberto" pra sempre quando a mitigação expira
 Pedido do usuário (mesma correção do FlowGuard, aplicada aqui): um sinal

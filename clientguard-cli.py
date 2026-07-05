@@ -169,6 +169,34 @@ def cmd_top(args: argparse.Namespace, sock_path: str) -> None:
 _MITIGATION_MECHANISM_LABELS = {"flowspec": "FlowSpec", "ssh": "SSH/ACL"}
 
 
+def _fmt_duration(seconds: int) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60:02d}s"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+
+
+# pedido do usuário: "aberto" sozinho não diz se está REALMENTE acontecendo
+# agora — um sinal fica "aberto" enquanto a condição continuar batendo
+# (correto), mas nada avisava quando isso já tinha parado há muito tempo e o
+# registro só ainda não resolveu sozinho (ver resolve_stale_signals, que só
+# resolve depois de horas sem reconfirmação). ts_last_seen é atualizado a cada
+# ciclo em que o detector re-confirma a condição; janela "fresca" de 90s cobre
+# ~3 ciclos de agregação (30s padrão), com folga pra jitter.
+_ACTIVITY_FRESH_WINDOW_S = 90
+
+
+def _fmt_activity_freshness(ts_last_seen: int | None, row_open: bool) -> str:
+    if not row_open or not ts_last_seen:
+        return "-"
+    age_s = int(time.time()) - ts_last_seen
+    if age_s < _ACTIVITY_FRESH_WINDOW_S:
+        return "[green]🟢 em andamento[/green]"
+    return f"[yellow]🟡 sem atividade há {_fmt_duration(age_s)}[/yellow]"
+
+
 def _fmt_mitigation_cell(mitigation: dict | None, row_open: bool = False) -> str:
     if not mitigation:
         return "[dim]sem mitigação[/dim]"
@@ -196,13 +224,16 @@ def cmd_suspicious(args: argparse.Namespace, sock_path: str) -> None:
     table.add_column("Confiança", justify="right")
     table.add_column("Detectado em")
     table.add_column("Última vez")
+    table.add_column("Atividade")
     table.add_column("Mitigação")
     for row in resp["suspicious"]:
+        row_open = not row.get("resolved")
         table.add_row(
             str(row["id"]), row["src_ip"], row["customer_prefix"] or "-",
             SIGNAL_LABELS.get(row["signal_type"], row["signal_type"]),
             f"{(row['confidence'] or 0) * 100:.0f}%", fmt_ts(row["ts_detected"]), fmt_ts(row["ts_last_seen"]),
-            _fmt_mitigation_cell(row.get("mitigation"), not row.get("resolved")),
+            _fmt_activity_freshness(row.get("ts_last_seen"), row_open),
+            _fmt_mitigation_cell(row.get("mitigation"), row_open),
         )
     if not resp["suspicious"]:
         console.print(f"[green]{title}: nenhum registro.[/green]")
