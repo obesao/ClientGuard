@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.26.0**
+**Versão atual: v1.26.1**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,18 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.26.1 — 2026-07-05 — Sobe orçamento de regras FlowSpec do ClientGuard (20 → 30)
+Decisão operacional após a auditoria da v1.26.0 (1189 ocorrências reais do
+aviso de orçamento atingido em ~2 dias): `max_active_rules` em
+`flowspec_mitigation.yaml` sobe de 20 pra 30, dentro do teto total
+compartilhado do FlowGuard (`mitigation.max_rules: 50`) — ainda sobram 20
+vagas de margem reservada pra mitigação real de DDoS, que é sempre
+prioridade sobre bloqueio de scan. Padrão de código (`DEFAULT_CONFIG` em
+`flowspec_mitigation.py`) continua em 20 — só a config já em produção mudou.
+
+Aplicado via `clientguard-cli reload` (recarrega `flowspec_mitigation_cfg`
+sem precisar reiniciar o daemon, sem interromper mitigações já ativas).
 
 ### v1.26.0 — 2026-07-05 — "sem proteção" não aparece mais pra sinal que já parou de verdade
 Pedido do usuário: mesmo com o indicador de atividade da v1.25.0, o selo de

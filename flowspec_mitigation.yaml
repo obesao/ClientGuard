@@ -5,7 +5,7 @@
 # max_active_rules/dns_rate_limit_floor_bps/spam_rate_limit_bps/rate_limit_sigma só
 # à mão aqui.
 default_ttl_s: 21600
-max_active_rules: 20
+max_active_rules: 30
 dns_rate_limit_floor_bps: 200000
 spam_rate_limit_bps: 500000
 rate_limit_sigma: 3
