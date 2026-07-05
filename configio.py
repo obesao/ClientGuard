@@ -94,3 +94,17 @@ def save_feature_toggles(path: str, changes: dict) -> dict:
         fh.write(TOGGLES_HEADER.rstrip() + "\n")
         yaml.safe_dump(current, fh, sort_keys=False, allow_unicode=True)
     return current
+
+
+# --- detection_templates.yaml: perfis de limiar reutilizáveis por tipo de rede -----
+# Associado a um customer_prefix via `template:` em customers.yaml (ver detector.py::
+# run_all, que resolve o limiar efetivo por prefixo: template > detection.* global).
+# Arquivo ausente/vazio = nenhum template disponível, todo prefixo cai no valor
+# global de config.yaml — mesmo comportamento de antes desta feature existir.
+def load_detection_templates(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+    except FileNotFoundError:
+        return {}
+    return data or {}

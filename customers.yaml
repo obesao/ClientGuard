@@ -5,12 +5,20 @@
 # Editável diretamente ou via: clientguard-cli customers add|del <network> <prefix>
 #
 # client_multiplier: quantas identidades reais um único src_ip visível desse prefixo pode
-# representar combinadas (ex.: pool de CGNAT, onde 1 IP externo = várias pessoas atrás do
-# NAT). detector.py escala os limiares de volume/diversidade por esse fator pra não confundir
-# tráfego combinado de várias pessoas com o comportamento de 1 cliente só. Sem o campo (ou
-# valor 1), nenhum ajuste é aplicado.
+# representar combinadas (ex.: pool de CGNAT PÓS-NAT, onde 1 IP público externo = várias
+# pessoas atrás do NAT). detector.py escala os limiares de volume/diversidade por esse
+# fator pra não confundir tráfego combinado de várias pessoas com o comportamento de 1
+# cliente só. Sem o campo (ou valor 1), nenhum ajuste é aplicado.
+#
+# template: perfil de limiar de detecção (ver detection_templates.yaml) — 'cgnat' pra
+# pools com muitos clientes ativos e tráfego residencial diverso (torrent/jogos/VoIP,
+# PRÉ ou PÓS-NAT — não precisa de client_multiplier se o NetFlow já captura o IP
+# pré-NAT, 1 IP = 1 cliente real, caso de 100.64.0.0/10), 'cdn' pra infraestrutura
+# própria (core, relay/TURN, cache) com fan-out extremo esperado. Sem o campo, o
+# prefixo usa o limiar global de detection.* em config.yaml.
 - network: 177.86.16.0/24
   prefix: 177.86.16.0/24
+  template: cdn   # core da POX — poucos hosts, fan-out extremo pra muitos destinos (DNS/NTP/monitoramento)
 - network: 177.86.17.0/24
   prefix: 177.86.17.0/24
 - network: 177.86.18.0/24
@@ -21,10 +29,12 @@
   prefix: 177.86.20.0/24
   name: CGNAT-B20
   client_multiplier: 32
+  template: cgnat
 - network: 177.86.21.0/24
   prefix: 177.86.21.0/24
   name: CGNAT-B21
   client_multiplier: 32
+  template: cgnat
 - network: 177.86.22.0/24
   prefix: 177.86.22.0/24
 - network: 177.86.23.0/24
@@ -32,3 +42,4 @@
 - network: 100.64.0.0/10
   prefix: 100.64.0.0/10
   name: CGNAT-PPPOE
+  template: cgnat   # NetFlow captura o IP pré-NAT (1 IP = 1 sessão PPPoE ≈ 1 cliente real) — sem client_multiplier

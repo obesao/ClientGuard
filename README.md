@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.27.0**
+**Versão atual: v1.28.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,45 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.28.0 — 2026-07-05 — Templates de limiar por perfil de rede (cgnat/cdn)
+Pedido do usuário: depois de aprender o tráfego real (v1.27.0), gerar templates
+de CGNAT e CDN pra facilitar ajustar os limites de cada barramento `/24` sem
+recalibrar os mesmos números na mão pra cada rede nova do mesmo perfil.
+
+**Achado que motivou reabrir o limiar global**: analisando só os prefixos SEM
+CGNAT (177.86.17/18/19/22/23), o p99.9 de scan_vertical parecia 2217 — bem
+acima do que o resto da base precisa — mas isso vinha de UM host só
+(`177.86.17.51`) claramente um relay/TURN interno (conectando a dezenas de
+clientes CGNAT com centenas/milhares de portas por destino, sustentado por
+horas, com volume real — confirmado com o usuário como serviço próprio da
+POX). **Esse IP já estava coberto por uma faixa existente em `whitelist.yaml`
+(177.86.17.48/29)** — não precisou de mudança ali, só confirma que o
+mecanismo certo pra exceção de 1 host específico é whitelist, não afrouxar o
+limiar de toda uma `/24`. Sem esse outlier, o limiar "normal" real fica bem
+mais baixo — por isso os limiares globais da v1.27.0 (250/300, calibrados só
+com dados do CGNAT-PPPOE) voltam pra 50/150, mais sensíveis pra quem não é
+CGNAT nem infra própria.
+
+**Novo mecanismo**: `detection_templates.yaml` (novo) define perfis nomeados
+de limiar (`cgnat`: 250/300, mesmos números da v1.27.0; `cdn`: 15000/15000,
+calibrado nos 2 casos reais de infra própria encontrados — core com fan-out
+extremo pra muitos destinos, relay com fan-out extremo de portas). Cada rede
+em `customers.yaml` ganha um campo opcional `template:` — resolvido em
+`detector.py::_effective_threshold` com prioridade template > global, e o
+`client_multiplier` (população combinada) continua aplicando por cima disso
+quando os dois se acumulam (ex.: pool CGNAT pós-NAT com template E
+multiplier). Sem `template`, o prefixo cai no limiar global normalmente —
+nenhuma mudança de comportamento pra quem não usa a feature.
+
+Atribuído nesta leva: `100.64.0.0/10` (CGNAT-PPPOE) e `177.86.20.0/24`/
+`177.86.21.0/24` (CGNAT-B20/B21, mantendo o `client_multiplier: 32` já
+existente) → `cgnat`; `177.86.16.0/24` (core da POX) → `cdn`.
+
+10 testes novos (`test_configio.py`, `test_detector.py`) cobrindo o loader,
+a resolução isolada por template e a combinação template+multiplier;
+aplicado com restart do daemon (mesmo motivo da v1.27.0: limiares vêm de
+config/customers, só lidos na inicialização).
 
 ### v1.27.0 — 2026-07-05 — Recalibra limiares de scan com base em monitoramento real de flow
 Pedido do usuário: monitorar o consumo real via flow pra reajustar os limiares

@@ -113,6 +113,35 @@ def test_scan_horizontal_still_triggers_on_low_volume_probes(conn):
     assert "port_scan_horizontal" in signal_types(conn)
 
 
+def test_scan_horizontal_template_override_suppresses_below_effective_threshold(conn):
+    # 15 hosts distintos > threshold global (10), mas o prefixo usa o template 'cgnat'
+    # (limiar bem mais alto) — não deve disparar
+    for i in range(15):
+        insert_flow(conn, "100.64.5.8", f"45.10.{i}.1", 22, protocol=6, customer_prefix="100.64.0.0/10")
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=10, whitelist=set(),
+                                     prefix_overrides={"100.64.0.0/10": 250})
+    assert not open_signals(conn)
+
+
+def test_scan_horizontal_template_override_still_triggers_above_effective_threshold(conn):
+    for i in range(30):
+        insert_flow(conn, "100.64.5.9", f"45.10.{i}.1", 22, protocol=6, customer_prefix="100.64.0.0/10")
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=10, whitelist=set(),
+                                     prefix_overrides={"100.64.0.0/10": 20})
+    assert "port_scan_horizontal" in signal_types(conn)
+
+
+def test_scan_horizontal_template_override_combines_with_multiplier(conn):
+    # template resolve a base (10 -> 20), multiplier escala em cima disso (20*4=80) —
+    # 30 hosts fica abaixo do limiar efetivo combinado
+    for i in range(30):
+        insert_flow(conn, "100.64.5.10", f"45.10.{i}.1", 22, protocol=6, customer_prefix="100.64.0.0/10")
+    detector.detect_scan_horizontal(conn, WINDOW_S, threshold=10, whitelist=set(),
+                                     prefix_overrides={"100.64.0.0/10": 20},
+                                     multipliers={"100.64.0.0/10": 4})
+    assert not open_signals(conn)
+
+
 def test_scan_horizontal_ignores_icmp(conn):
     # achado real monitorando flow de produção: protocol=1 (ICMP) não tem porta de
     # verdade — o "dst_port" gravado é um artefato do NetFlow (type/code), não uma
@@ -161,6 +190,22 @@ def test_scan_vertical_still_triggers_on_low_volume_probes(conn):
     for port in range(30):
         insert_flow(conn, "177.86.19.7", "45.20.30.41", 1 + port, protocol=6, bytes_=60)
     detector.detect_scan_vertical(conn, WINDOW_S, threshold=30, whitelist=set(), max_avg_bytes=10_000)
+    assert "port_scan_vertical" in signal_types(conn)
+
+
+def test_scan_vertical_template_override_suppresses_below_effective_threshold(conn):
+    for port in range(15):
+        insert_flow(conn, "100.64.5.11", "45.20.30.40", 1 + port, protocol=6, customer_prefix="100.64.0.0/10")
+    detector.detect_scan_vertical(conn, WINDOW_S, threshold=10, whitelist=set(),
+                                   prefix_overrides={"100.64.0.0/10": 300})
+    assert not open_signals(conn)
+
+
+def test_scan_vertical_template_override_still_triggers_above_effective_threshold(conn):
+    for port in range(30):
+        insert_flow(conn, "100.64.5.12", "45.20.30.40", 1 + port, protocol=6, customer_prefix="100.64.0.0/10")
+    detector.detect_scan_vertical(conn, WINDOW_S, threshold=10, whitelist=set(),
+                                   prefix_overrides={"100.64.0.0/10": 20})
     assert "port_scan_vertical" in signal_types(conn)
 
 
@@ -415,6 +460,27 @@ def test_run_all_runs_detector_when_toggle_missing_defaults_enabled(conn):
     for i in range(10):
         insert_flow(conn, "177.86.19.91", f"45.10.{i}.1", 22, protocol=6)
     detector.run_all(conn, _base_config(), whitelist=set(), toggles={})
+    assert "port_scan_horizontal" in signal_types(conn)
+
+
+def test_run_all_resolves_scan_thresholds_via_customer_template(conn):
+    # limiar global é 5 (_base_config); o prefixo usa template 'cgnat' (limiar 20) —
+    # 10 hosts fica acima do global mas abaixo do efetivo, não deve disparar
+    for i in range(10):
+        insert_flow(conn, "100.64.5.20", f"45.10.{i}.1", 22, protocol=6, customer_prefix="100.64.0.0/10")
+    customers = [{"prefix": "100.64.0.0/10", "template": "cgnat"}]
+    templates = {"cgnat": {"scan_horizontal_hosts": 20, "scan_vertical_ports": 20}}
+    detector.run_all(conn, _base_config(), whitelist=set(), customers=customers, templates=templates)
+    assert not open_signals(conn)
+
+
+def test_run_all_template_does_not_affect_prefix_without_it(conn):
+    # mesmo cenário, mas outro prefixo sem template — continua caindo no limiar global (5)
+    for i in range(10):
+        insert_flow(conn, "177.86.19.93", f"45.10.{i}.1", 22, protocol=6, customer_prefix="177.86.19.0/24")
+    customers = [{"prefix": "100.64.0.0/10", "template": "cgnat"}]
+    templates = {"cgnat": {"scan_horizontal_hosts": 20, "scan_vertical_ports": 20}}
+    detector.run_all(conn, _base_config(), whitelist=set(), customers=customers, templates=templates)
     assert "port_scan_horizontal" in signal_types(conn)
 
 

@@ -97,3 +97,27 @@ def test_save_feature_toggles_does_not_lose_concurrent_style_batch(tmp_path):
     updated = configio.save_feature_toggles(str(path), changes)
     assert updated == {k: False for k in configio.DEFAULT_FEATURE_TOGGLES}
     assert configio.load_feature_toggles(str(path)) == updated
+
+
+# --- detection_templates.yaml -------------------------------------------------
+
+def test_load_detection_templates_missing_file_returns_empty(tmp_path):
+    assert configio.load_detection_templates(str(tmp_path / "nao-existe.yaml")) == {}
+
+
+def test_load_detection_templates_empty_file_returns_empty(tmp_path):
+    path = tmp_path / "detection_templates.yaml"
+    path.write_text("")
+    assert configio.load_detection_templates(str(path)) == {}
+
+
+def test_load_detection_templates_reads_named_profiles(tmp_path):
+    path = tmp_path / "detection_templates.yaml"
+    path.write_text(
+        "cgnat:\n  scan_horizontal_hosts: 250\n  scan_vertical_ports: 300\n"
+        "cdn:\n  scan_horizontal_hosts: 15000\n"
+    )
+    templates = configio.load_detection_templates(str(path))
+    assert templates["cgnat"]["scan_horizontal_hosts"] == 250
+    assert templates["cgnat"]["scan_vertical_ports"] == 300
+    assert templates["cdn"]["scan_horizontal_hosts"] == 15000

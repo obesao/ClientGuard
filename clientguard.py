@@ -33,6 +33,7 @@ from customer_registry import WhitelistMatcher, classify_client_side
 LOG = logging.getLogger("clientguard")
 
 DEFAULT_CONFIG_PATH = str(Path(__file__).resolve().parent / "config.yaml")
+DEFAULT_DETECTION_TEMPLATES_PATH = str(Path(__file__).resolve().parent / "detection_templates.yaml")
 
 
 class ClientGuardDaemon:
@@ -54,6 +55,8 @@ class ClientGuardDaemon:
             self.config.get("edge_mitigation_file", edge_mitigation.DEFAULT_CONFIG_PATH))
         self.flowspec_mitigation_cfg = flowspec_mitigation.load_config(
             self.config.get("flowspec_mitigation_file", flowspec_mitigation.DEFAULT_CONFIG_PATH))
+        self.detection_templates = configio.load_detection_templates(
+            self.config.get("detection_templates_file", DEFAULT_DETECTION_TEMPLATES_PATH))
         self.ai_client = ai_client.AIClient(self.config.get("ai", {}))
         self.threat_feed = threat_feed.ThreatFeed(self.config.get("threat_feed", {}).get("cache_file", ""))
         self.geoip = geoip.GeoIPCache(self.conn, self.db_lock)
@@ -70,8 +73,10 @@ class ClientGuardDaemon:
             self.config.get("edge_mitigation_file", edge_mitigation.DEFAULT_CONFIG_PATH))
         self.flowspec_mitigation_cfg = flowspec_mitigation.load_config(
             self.config.get("flowspec_mitigation_file", flowspec_mitigation.DEFAULT_CONFIG_PATH))
-        LOG.info("config recarregado: %d clientes cadastrados, %d na whitelist, toggles=%s",
-                 len(self.customers), len(self.whitelist), self.toggles)
+        self.detection_templates = configio.load_detection_templates(
+            self.config.get("detection_templates_file", DEFAULT_DETECTION_TEMPLATES_PATH))
+        LOG.info("config recarregado: %d clientes cadastrados, %d na whitelist, %d templates de detecção, toggles=%s",
+                 len(self.customers), len(self.whitelist), len(self.detection_templates), self.toggles)
 
     def threat_feed_loop(self) -> None:
         cfg = self.config.get("threat_feed", {})
@@ -222,7 +227,8 @@ class ClientGuardDaemon:
                 )
             detector.run_all(self.conn, self.config, self.whitelist, customers=self.customers,
                               ai_client=self.ai_client, threat_feed=self.threat_feed, db_lock=self.db_lock,
-                              toggles=self.toggles, mitigation_cfg=self.flowspec_mitigation_cfg)
+                              toggles=self.toggles, mitigation_cfg=self.flowspec_mitigation_cfg,
+                              templates=self.detection_templates)
             # depois de run_all, não antes — precisa saber quais (src_ip, classe) foram
             # flagrados NESTE ciclo pra excluir da baseline (anti-poisoning).
             self._update_traffic_baselines(groups, amplifier_ports, now)

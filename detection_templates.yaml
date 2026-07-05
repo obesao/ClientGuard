@@ -1,0 +1,32 @@
+# detection_templates.yaml — perfis de limiar de detecção reutilizáveis por tipo de
+# rede/barramento, associados a um customer_prefix via `template:` em customers.yaml.
+# Evita recalibrar os mesmos números pra cada /24 novo do mesmo perfil.
+#
+# Ordem de precedência (do mais específico pro mais genérico): valor explícito em
+# customers.yaml (se um dia existir por lá) > template > detection.* em config.yaml
+# (usado por qualquer prefixo sem `template` atribuído).
+#
+# Calibrado com monitoramento real de flow em 2026-07-05 (ver changelog v1.27.0/
+# v1.28.0) — reveja os números se o perfil de tráfego real mudar muito, ex.
+# mais um app popular de alto fan-out chegando na base de clientes.
+cgnat:
+  description: >
+    Pool CGNAT com muitos clientes ativos combinados (pré ou pós-NAT) — tráfego
+    residencial diverso: torrent (peer discovery bate muitos hosts por natureza),
+    jogos/relay P2P (dezenas a centenas de portas no mesmo servidor de jogo),
+    VoIP/VPN pessoal. Limiares calibrados no p99.5 real do prefixo CGNAT-PPPOE
+    (100.64.0.0/10, maior amostra disponível).
+  scan_horizontal_hosts: 250
+  scan_vertical_ports: 300
+cdn:
+  description: >
+    Infraestrutura própria (core, relay/TURN, cache/CDN) — poucos hosts ativos,
+    mas fan-out extremo por natureza: um servidor de core pode falar com milhares
+    de destinos distintos (DNS/NTP/monitoramento), um relay/TURN aloca uma porta
+    nova por sessão ativa (centenas a milhares de portas por destino, sustentado
+    por horas, com volume real de dados). Números iniciais generosos baseados nos
+    2 casos reais observados (177.86.16.0/24 core: ~13700 hosts distintos com só
+    4 IPs ativos; relay interno: ~2800 portas por destino) — ainda é pouca
+    amostra, reavaliar se algum servidor legítimo novo estourar isso.
+  scan_horizontal_hosts: 15000
+  scan_vertical_ports: 15000

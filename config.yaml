@@ -61,6 +61,11 @@ flowguard_reuse:
 
 customer_registry: /root/clientguard/customers.yaml
 whitelist_file: /root/clientguard/whitelist.yaml
+# perfis de limiar de detecção reutilizáveis por tipo de rede (cgnat/cdn), atribuídos
+# por prefixo via `template:` em customers.yaml — ver detection_templates.yaml e
+# detector.py::run_all/_effective_threshold. Arquivo ausente = nenhum template, todo
+# prefixo cai no valor global de detection.* abaixo (mesmo comportamento de antes).
+detection_templates_file: /root/clientguard/detection_templates.yaml
 # liga/desliga cada detector e a explicação por IA, editável via portal (aba
 # ClientGuard > Configurações) ou `clientguard-cli toggles set` — chave ausente
 # ou arquivo inexistente = habilitado (não muda comportamento pra quem não usar isso)
@@ -87,25 +92,19 @@ dns_baseline:
   stale_days: 14
 
 detection:
-  # Recalibrado 2026-07-05 com base em monitoramento real de flow (12h, prefixo
-  # CGNAT-PPPOE 100.64.0.0/10, que concentra a maior diversidade de apps de cliente
-  # residencial): com o limiar antigo (30), p99 de scan_vertical já era 37 e p99 de
-  # scan_horizontal (fora ICMP/portas comuns) era 234 — ou seja, 30 capturava tráfego
-  # normal, não abuso. BitTorrent (porta 6881/UDP) sozinho gera até ~600 hosts
-  # distintos por cliente; jogos/relay P2P (múltiplos destinos observados, ex.
-  # 27.124.18.114/115, 91.134.216.106) empurram scan_vertical pra 50-250 portas no
-  # mesmo destino rotineiramente. Novos limiares ficam acima do p99.5 observado —
-  # ainda capturam os casos claramente anômalos confirmados nos dados reais (scan de
-  # SSH porta 22 com 403 hosts distintos, por exemplo).
-  # IMPORTANTE (achado da auditoria): 100.64.0.0/10 é o pool CGNAT-PPPOE, mas o
-  # NetFlow captura o IP PRÉ-NAT (1 IP = 1 sessão PPPoE = ~1 cliente real) — não é
-  # o caso "1 IP público = N clientes combinados" que justificaria client_multiplier
-  # em customers.yaml (esse continua reservado pra pools pós-NAT tipo CGNAT-B20/B21,
-  # onde 1 IP público visível pode ser até 32 clientes reais). O volume alto aqui é
-  # de apps legítimas de alto fan-out, não população combinada — daí a correção ser
-  # nos limiares, não num multiplicador novo.
-  scan_horizontal_hosts: 250     # N destinos distintos, mesma porta, pra contar como scan horizontal
-  scan_vertical_ports: 300       # N portas distintas, mesmo destino, pra contar como scan vertical
+  # Recalibrado 2026-07-05 com base em monitoramento real de flow. Estes são os
+  # limiares GLOBAIS — valem só pra prefixo SEM `template` atribuído em
+  # customers.yaml (residencial "normal", sem CGNAT nem infra própria). Calibrados
+  # com 12h de flow real dos prefixos SEM CGNAT/relay conhecido: p99.9 de
+  # scan_horizontal (fora ICMP/portas comuns) foi 33, p99.9 de scan_vertical foi
+  # 2217 só por causa de 1 host de infra própria já identificado e resolvido via
+  # whitelist.yaml (177.86.17.51, relay/TURN — ver changelog) — sem ele, o teto real
+  # de tráfego residencial "normal" fica bem mais baixo. Prefixos com fan-out
+  # legítimo mais alto (pool CGNAT, infra própria) usam os templates 'cgnat'/'cdn'
+  # em detection_templates.yaml em vez de forçar esse limiar global pra cima — ver
+  # `template:` em customers.yaml e detector.py::_effective_threshold.
+  scan_horizontal_hosts: 50      # N destinos distintos, mesma porta, pra contar como scan horizontal
+  scan_vertical_ports: 150       # N portas distintas, mesmo destino, pra contar como scan vertical
   # tráfego P2P/torrent também bate muitos hosts/portas distintos, mas com volume real de
   # dados por destino — scan de reconhecimento de verdade manda pacotes pequenos de sonda
   # (às vezes só um SYN). 10000 (10 KB) de média por destino/porta separa os dois casos;

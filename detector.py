@@ -117,22 +117,38 @@ def _group_scaled_threshold(base: float, group_prefixes, multipliers: dict) -> f
     return base * max((multipliers.get(p, 1) for p in group_prefixes), default=1)
 
 
+def _effective_threshold(base: float, customer_prefix: str | None, prefix_overrides: dict, multipliers: dict) -> float:
+    """Como _scaled_threshold, mas primeiro resolve a BASE por prefixo via template
+    (customers.yaml::template -> detection_templates.yaml) antes de aplicar o
+    client_multiplier — ex.: um pool CGNAT usa o template 'cgnat' (limiar bem mais
+    alto, calibrado pro fan-out normal de torrent/jogos/VoIP) e, se além disso for
+    um pool pós-NAT com vários clientes reais combinados, o multiplier escala ainda
+    mais em cima disso. Sem override cadastrado, cai no base global (mesmo
+    comportamento de antes desta feature existir)."""
+    effective_base = (prefix_overrides or {}).get(customer_prefix, base)
+    return effective_base * multipliers.get(customer_prefix, 1)
+
+
 def detect_scan_horizontal(conn: sqlite3.Connection, window_s: int, threshold: int, whitelist: set,
                             exclude_ports: list[int] = (), multipliers: dict = None,
                             max_avg_bytes: float = None, webhook_url: str = "", ai_client=None,
-                            db_lock=None, wa_cfg: dict = None, mitigation_ctx: dict = None) -> None:
+                            db_lock=None, wa_cfg: dict = None, mitigation_ctx: dict = None,
+                            prefix_overrides: dict = None) -> None:
     """1 src_ip -> N dst_ip distintos, mesma dst_port -> varredura horizontal (reconhecimento).
 
     exclude_ports precisa cobrir portas de web/CDN (443/80) — sem isso, qualquer navegação
     normal (uma página com dezenas de IPs de borda de CDN) bate o limiar e é indistinguível
     de reconhecimento de rede de verdade.
 
-    multipliers (customer_prefix -> fator) escala o limiar efetivo pra prefixos onde um
-    único src_ip visível representa várias identidades reais combinadas (ex.: pool de
-    CGNAT, onde 1 IP externo = até dezenas de clientes reais) — sem isso, o volume/
-    diversidade combinado de todo mundo atrás do NAT bate o limiar pensado pra 1 cliente.
-    A query usa o threshold base como piso (mais barato); o filtro fino por multiplicador
-    é feito em Python, já que o fator varia por linha.
+    prefix_overrides (customer_prefix -> limiar base) resolve o limiar por TEMPLATE
+    (customers.yaml::template -> detection_templates.yaml, ex. 'cgnat'/'cdn') antes de
+    aplicar o multiplier — ver detector.run_all e _effective_threshold. multipliers
+    (customer_prefix -> fator) escala esse limiar já resolvido pra prefixos onde um único
+    src_ip visível representa várias identidades reais combinadas (pool CGNAT pós-NAT) —
+    sem isso, o volume/diversidade combinado de todo mundo atrás do NAT bate o limiar
+    pensado pra 1 cliente. A query usa o MENOR limiar entre o global e os overrides como
+    piso (mais barato); o filtro fino por prefixo é feito em Python, já que o valor varia
+    por linha.
 
     max_avg_bytes filtra tráfego P2P/torrent (muitos hosts distintos, mas com volume real
     de dados por destino) — scan de reconhecimento de verdade manda pacotes pequenos de
@@ -144,8 +160,13 @@ def detect_scan_horizontal(conn: sqlite3.Connection, window_s: int, threshold: i
     cliente (falso positivo caro) e "rate_limit" mal freava o scan (sonda é pacote
     pequeno, não volume de banda) — as únicas duas opções ruins que existiam antes."""
     multipliers = multipliers or {}
+    prefix_overrides = prefix_overrides or {}
     lock = db_lock or nullcontext()
     since = int(time.time()) - window_s
+    # piso da query = menor limiar possível entre o global e qualquer override de
+    # template — nunca pode ser MAIOR que o efetivo de nenhum prefixo, senão a query
+    # já descarta em SQL uma linha que um prefixo com limiar mais baixo precisaria ver.
+    sql_floor = min([threshold, *prefix_overrides.values()]) if prefix_overrides else threshold
     # protocol=1 (ICMP) não tem porta de verdade — o "dst_port" gravado pro flow ICMP é
     # um artefato (type/code do NetFlow), não uma porta real. Achado real monitorando
     # tráfego de produção: isso gerava dst_port como 0/771/2048 etc. com milhares de
@@ -160,13 +181,13 @@ def detect_scan_horizontal(conn: sqlite3.Connection, window_s: int, threshold: i
         query += f" AND dst_port NOT IN ({','.join('?' * len(exclude_ports))})"
         params.extend(exclude_ports)
     query += " GROUP BY src_ip, dst_port, protocol HAVING n_hosts >= ?"
-    params.append(threshold)
+    params.append(sql_floor)
     with lock:
         rows = conn.execute(query, params).fetchall()
     for r in rows:
         if r["src_ip"] in whitelist:
             continue
-        effective = _scaled_threshold(threshold, r["customer_prefix"], multipliers)
+        effective = _effective_threshold(threshold, r["customer_prefix"], prefix_overrides, multipliers)
         if r["n_hosts"] < effective:
             continue
         avg_bytes = r["total_bytes"] / r["n_hosts"]
@@ -185,12 +206,15 @@ def detect_scan_horizontal(conn: sqlite3.Connection, window_s: int, threshold: i
 
 def detect_scan_vertical(conn: sqlite3.Connection, window_s: int, threshold: int, whitelist: set,
                           multipliers: dict = None, max_avg_bytes: float = None, webhook_url: str = "",
-                          ai_client=None, db_lock=None, wa_cfg: dict = None, mitigation_ctx: dict = None) -> None:
+                          ai_client=None, db_lock=None, wa_cfg: dict = None, mitigation_ctx: dict = None,
+                          prefix_overrides: dict = None) -> None:
     """1 src_ip -> N dst_port distintas, mesmo dst_ip -> varredura de vulnerabilidade.
 
-    multipliers escala o limiar pra prefixos CGNAT — ver docstring de detect_scan_horizontal.
-    max_avg_bytes filtra P2P/torrent (muitas portas, mas volume real por porta) — mesmo
-    raciocínio de detect_scan_horizontal.
+    prefix_overrides resolve o limiar por template antes do multiplier, multipliers
+    escala o limiar já resolvido pra prefixos CGNAT pós-NAT — ver docstring de
+    detect_scan_horizontal/_effective_threshold. max_avg_bytes filtra P2P/torrent
+    (muitas portas, mas volume real por porta) — mesmo raciocínio de
+    detect_scan_horizontal.
 
     mitigation_match recorta a regra FlowSpec pro dst_ip vítima (dst_prefix=vítima/32),
     protocolo-agnóstico (queremos blindar a vítima de QUALQUER porta/protocolo que o
@@ -198,8 +222,10 @@ def detect_scan_vertical(conn: sqlite3.Connection, window_s: int, threshold: int
     tráfego do cliente pra qualquer destino. Efeito: o cliente continua acessando o
     resto da internet normalmente, só não alcança mais aquela vítima específica."""
     multipliers = multipliers or {}
+    prefix_overrides = prefix_overrides or {}
     lock = db_lock or nullcontext()
     since = int(time.time()) - window_s
+    sql_floor = min([threshold, *prefix_overrides.values()]) if prefix_overrides else threshold
     with lock:
         # protocol != 1: mesmo motivo do detect_scan_horizontal — ICMP não tem porta
         # de verdade, o campo é um artefato do NetFlow (type/code), não uma porta.
@@ -208,12 +234,12 @@ def detect_scan_vertical(conn: sqlite3.Connection, window_s: int, threshold: int
                       SUM(bytes) AS total_bytes
                FROM client_flow_aggs WHERE ts >= ? AND protocol != 1
                GROUP BY src_ip, dst_ip HAVING n_ports >= ?""",
-            (since, threshold),
+            (since, sql_floor),
         ).fetchall()
     for r in rows:
         if r["src_ip"] in whitelist:
             continue
-        effective = _scaled_threshold(threshold, r["customer_prefix"], multipliers)
+        effective = _effective_threshold(threshold, r["customer_prefix"], prefix_overrides, multipliers)
         if r["n_ports"] < effective:
             continue
         avg_bytes = r["total_bytes"] / r["n_ports"]
@@ -413,9 +439,28 @@ def detect_dns_tunneling(conn: sqlite3.Connection, window_s: int, min_queries: i
                         {"protocol": "udp", "dst_port": "53", "dst_prefix": f"{r['dst_ip']}/32"})
 
 
+def _template_overrides(customers: list[dict], templates: dict, key: str) -> dict:
+    """customer_prefix -> valor de `key` no template atribuído a esse prefixo
+    (customers.yaml::template -> detection_templates.yaml), só pros prefixos que têm
+    template E o template define essa chave. Sem template atribuído (a maioria dos
+    prefixos) ou detection_templates.yaml vazio/ausente, o prefixo simplesmente não
+    entra no dict — quem consome (_effective_threshold) cai no valor global nesse caso."""
+    templates = templates or {}
+    out = {}
+    for c in customers:
+        prefix = c.get("prefix")
+        tmpl_name = c.get("template")
+        if not prefix or not tmpl_name:
+            continue
+        tmpl = templates.get(tmpl_name)
+        if tmpl and key in tmpl:
+            out[prefix] = tmpl[key]
+    return out
+
+
 def run_all(conn: sqlite3.Connection, config: dict, whitelist: set, customers: list[dict] = (),
             ai_client=None, threat_feed=None, db_lock=None, toggles: dict = None,
-            mitigation_cfg: dict = None) -> None:
+            mitigation_cfg: dict = None, templates: dict = None) -> None:
     """toggles (ver configio.DEFAULT_FEATURE_TOGGLES) liga/desliga cada detector
     individualmente, e ai_explanations liga/desliga a explicação de IA pra qualquer
     sinal que dispare nesse ciclo — chave ausente = habilitado, pra não mudar
@@ -426,7 +471,13 @@ def run_all(conn: sqlite3.Connection, config: dict, whitelist: set, customers: l
     desativa completamente (nenhum detector dispara mitigação sozinho, só o botão
     manual do portal/CLI funciona). Substitui o antigo edge_cfg (SSH/ACL) como
     caminho de auto-mitigação; edge_mitigation.py continua existindo só pra reverter
-    mitigações SSH já ativas de antes desta migração."""
+    mitigações SSH já ativas de antes desta migração.
+
+    templates (ver configio.load_detection_templates) resolve limiares de
+    scan_horizontal/scan_vertical por PERFIL de rede (customers.yaml::template, ex.
+    'cgnat'/'cdn') antes do multiplier — evita recalibrar os mesmos números pra cada
+    /24 novo do mesmo perfil. None/vazio: todo prefixo cai no valor global de
+    detection.* (mesmo comportamento de antes desta feature existir)."""
     toggles = toggles or {}
 
     def on(key: str) -> bool:
@@ -445,18 +496,24 @@ def run_all(conn: sqlite3.Connection, config: dict, whitelist: set, customers: l
             "flowguard_path": config.get("flowguard_reuse", {}).get("path", "/root/flowguard"),
         }
     # customer_prefix -> fator: quantas identidades reais um único src_ip visível daquele
-    # prefixo pode representar (ex.: pool de CGNAT). Default implícito é 1 (sem ajuste).
+    # prefixo pode representar (ex.: pool de CGNAT pós-NAT). Default implícito é 1 (sem
+    # ajuste) — não confundir com `templates`: multiplier é sobre população combinada,
+    # template é sobre PERFIL de tráfego esperado (ver _effective_threshold).
     multipliers = {c["prefix"]: c["client_multiplier"] for c in customers
                    if c.get("prefix") and c.get("client_multiplier")}
+    horizontal_overrides = _template_overrides(customers, templates, "scan_horizontal_hosts")
+    vertical_overrides = _template_overrides(customers, templates, "scan_vertical_ports")
     max_avg_bytes = det.get("scan_max_avg_bytes")
     ai = ai_client if on("ai_explanations") else None
     if on("scan_horizontal"):
         detect_scan_horizontal(conn, det["window_s"], det["scan_horizontal_hosts"], whitelist,
                                 det["common_service_ports"], multipliers, max_avg_bytes,
-                                webhook_url, ai, db_lock, wa_cfg, mitigation_ctx)
+                                webhook_url, ai, db_lock, wa_cfg, mitigation_ctx,
+                                prefix_overrides=horizontal_overrides)
     if on("scan_vertical"):
         detect_scan_vertical(conn, det["window_s"], det["scan_vertical_ports"], whitelist,
-                              multipliers, max_avg_bytes, webhook_url, ai, db_lock, wa_cfg, mitigation_ctx)
+                              multipliers, max_avg_bytes, webhook_url, ai, db_lock, wa_cfg, mitigation_ctx,
+                              prefix_overrides=vertical_overrides)
     if on("amplifier"):
         detect_amplifier(conn, det["window_s"], det["amplifier_ports"], det["amplifier_min_bps"], whitelist,
                           multipliers, webhook_url, ai, db_lock, wa_cfg, mitigation_ctx)
