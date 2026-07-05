@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.25.0**
+**Versão atual: v1.26.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,37 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.26.0 — 2026-07-05 — "sem proteção" não aparece mais pra sinal que já parou de verdade
+Pedido do usuário: mesmo com o indicador de atividade da v1.25.0, o selo de
+mitigação continuava mostrando "⚠ sem proteção" pra sinais que já não tinham
+reconfirmação real há um tempo (🟡 sem atividade) — na prática já parados,
+só aguardando o fechamento automático (rede de segurança de 6h).
+
+`_fmt_mitigation_cell` agora só mostra "⚠ sem proteção" quando o sinal está
+GENUINAMENTE em andamento (nova `_is_genuinely_active`: mesmo critério do
+🟢/🟡 — `resolved=0` E `ts_last_seen` reconfirmado há menos de 90s). Se está
+aberto mas sem atividade recente, volta a mostrar "encerrada" (neutro).
+
+**Auditoria à parte, sobre por que muitos sinais mostram "sem mitigação"**
+(nenhuma regra jamais tentada): confirmado nos dados reais que a causa
+principal é `max_active_rules` (orçamento próprio do ClientGuard no budget
+compartilhado de regras FlowSpec do FlowGuard, hoje 20) genuinamente
+saturado — as 20 vagas ativas no momento da auditoria estavam TODAS ocupadas
+por sinais legítimos e recentes (a maioria com atividade a poucos segundos/
+minutos), não por regras órfãs/vencidas que deveriam ter liberado espaço.
+Confirmado no log: o aviso "orçamento de regras FlowSpec do ClientGuard
+atingido" apareceu **1189 vezes** desde 2026-07-03 — volume de scans
+concorrentes está genuinamente acima da capacidade reservada. `port_scan_*`
+é reavaliado a cada ciclo (`detector.py` já re-dispara `trigger_async`
+enquanto o sinal seguir aberto sem mitigação — sem bug de "só tenta uma
+vez"), então assim que uma vaga libera o próximo scan pendente é mitigado
+sozinho no ciclo seguinte. Fica como decisão operacional em aberto: subir
+`max_active_rules` (reduz a margem reservada pro FlowGuard) ou aceitar que
+nem todo scan simultâneo será bloqueado.
+
+Validado com Playwright real e testes unitários da lógica de gating (4 casos
+de borda: aberto+fresco, aberto+parado, resolvido, sem ts_last_seen).
 
 ### v1.25.0 — 2026-07-04 — Indicador "atividade recente" no CLI (suspicious)
 Pedido do usuário: "aberto" sozinho não diz se o sinal está REALMENTE
