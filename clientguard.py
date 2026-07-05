@@ -33,12 +33,16 @@ from customer_registry import WhitelistMatcher, classify_client_side
 LOG = logging.getLogger("clientguard")
 
 DEFAULT_CONFIG_PATH = str(Path(__file__).resolve().parent / "config.yaml")
-DEFAULT_DETECTION_TEMPLATES_PATH = str(Path(__file__).resolve().parent / "detection_templates.yaml")
 
 
 class ClientGuardDaemon:
     def __init__(self, config_path: str):
         self.config = yaml.safe_load(open(config_path, encoding="utf-8"))
+        # snapshot dos limiares de detecção TAL COMO vieram do config.yaml (só lido
+        # aqui, na inicialização) — reload_config recalcula self.config["detection"]
+        # a partir deste snapshot + detection_overrides.yaml a cada chamada, então um
+        # ajuste fino salvo via portal aplica sem precisar reiniciar o daemon.
+        self._detection_base = dict(self.config["detection"])
         self.template_store = TemplateStore()
         self.queue: queue.Queue = queue.Queue(maxsize=200_000)
         self.conn = storage.connect(self.config["database"]["path"], check_same_thread=False)
@@ -56,7 +60,9 @@ class ClientGuardDaemon:
         self.flowspec_mitigation_cfg = flowspec_mitigation.load_config(
             self.config.get("flowspec_mitigation_file", flowspec_mitigation.DEFAULT_CONFIG_PATH))
         self.detection_templates = configio.load_detection_templates(
-            self.config.get("detection_templates_file", DEFAULT_DETECTION_TEMPLATES_PATH))
+            self.config.get("detection_templates_file", configio.DEFAULT_DETECTION_TEMPLATES_PATH))
+        self.config["detection"] = {**self._detection_base, **configio.load_detection_overrides(
+            self.config.get("detection_overrides_file", configio.DEFAULT_DETECTION_OVERRIDES_PATH))}
         self.ai_client = ai_client.AIClient(self.config.get("ai", {}))
         self.threat_feed = threat_feed.ThreatFeed(self.config.get("threat_feed", {}).get("cache_file", ""))
         self.geoip = geoip.GeoIPCache(self.conn, self.db_lock)
@@ -74,7 +80,12 @@ class ClientGuardDaemon:
         self.flowspec_mitigation_cfg = flowspec_mitigation.load_config(
             self.config.get("flowspec_mitigation_file", flowspec_mitigation.DEFAULT_CONFIG_PATH))
         self.detection_templates = configio.load_detection_templates(
-            self.config.get("detection_templates_file", DEFAULT_DETECTION_TEMPLATES_PATH))
+            self.config.get("detection_templates_file", configio.DEFAULT_DETECTION_TEMPLATES_PATH))
+        # recalculado a partir do snapshot de config.yaml (_detection_base) + overrides
+        # atuais — permite que um ajuste fino salvo via portal/CLI aplique aqui, sem
+        # precisar reiniciar o daemon (diferente de mudar config.yaml direto).
+        self.config["detection"] = {**self._detection_base, **configio.load_detection_overrides(
+            self.config.get("detection_overrides_file", configio.DEFAULT_DETECTION_OVERRIDES_PATH))}
         LOG.info("config recarregado: %d clientes cadastrados, %d na whitelist, %d templates de detecção, toggles=%s",
                  len(self.customers), len(self.whitelist), len(self.detection_templates), self.toggles)
 

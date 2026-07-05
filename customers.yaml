@@ -2,7 +2,8 @@
 # src_ip do flow é resolvido pro customer_prefix se cair dentro de alguma 'network' aqui
 # (aceita /32 pra host único ou qualquer CIDR). Se já existir cadastro em outro sistema
 # (RADIUS, ERP), preferir reusar aquele; este arquivo é o fallback.
-# Editável diretamente ou via: clientguard-cli customers add|del <network> <prefix>
+# Editável diretamente, via clientguard-cli customers add|del|edit, ou pelo portal
+# (aba ClientGuard > Configurações > Redes de Clientes).
 #
 # client_multiplier: quantas identidades reais um único src_ip visível desse prefixo pode
 # representar combinadas (ex.: pool de CGNAT PÓS-NAT, onde 1 IP público externo = várias
@@ -13,12 +14,12 @@
 # template: perfil de limiar de detecção (ver detection_templates.yaml) — 'cgnat' pra
 # pools com muitos clientes ativos e tráfego residencial diverso (torrent/jogos/VoIP,
 # PRÉ ou PÓS-NAT — não precisa de client_multiplier se o NetFlow já captura o IP
-# pré-NAT, 1 IP = 1 cliente real, caso de 100.64.0.0/10), 'cdn' pra infraestrutura
-# própria (core, relay/TURN, cache) com fan-out extremo esperado. Sem o campo, o
-# prefixo usa o limiar global de detection.* em config.yaml.
+# pré-NAT, 1 IP = 1 cliente real), 'cdn' pra infraestrutura própria (core, relay/TURN,
+# cache) com fan-out extremo esperado. Sem o campo, o prefixo usa o limiar global de
+# detection.* em config.yaml.
 - network: 177.86.16.0/24
   prefix: 177.86.16.0/24
-  template: cdn   # core da POX — poucos hosts, fan-out extremo pra muitos destinos (DNS/NTP/monitoramento)
+  template: cdn
 - network: 177.86.17.0/24
   prefix: 177.86.17.0/24
 - network: 177.86.18.0/24
@@ -42,4 +43,4 @@
 - network: 100.64.0.0/10
   prefix: 100.64.0.0/10
   name: CGNAT-PPPOE
-  template: cgnat   # NetFlow captura o IP pré-NAT (1 IP = 1 sessão PPPoE ≈ 1 cliente real) — sem client_multiplier
+  template: cgnat

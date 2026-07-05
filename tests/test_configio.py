@@ -121,3 +121,106 @@ def test_load_detection_templates_reads_named_profiles(tmp_path):
     assert templates["cgnat"]["scan_horizontal_hosts"] == 250
     assert templates["cgnat"]["scan_vertical_ports"] == 300
     assert templates["cdn"]["scan_horizontal_hosts"] == 15000
+
+
+def test_save_detection_template_creates_new(tmp_path):
+    path = tmp_path / "detection_templates.yaml"
+    result = configio.save_detection_template(
+        str(path), "cgnat", {"scan_horizontal_hosts": 250, "scan_vertical_ports": 300},
+        description="pool CGNAT",
+    )
+    assert result["cgnat"]["scan_horizontal_hosts"] == 250
+    assert result["cgnat"]["description"] == "pool CGNAT"
+    assert configio.load_detection_templates(str(path)) == result
+
+
+def test_save_detection_template_overwrites_existing_fully(tmp_path):
+    path = tmp_path / "detection_templates.yaml"
+    configio.save_detection_template(str(path), "cgnat", {"scan_horizontal_hosts": 250, "scan_vertical_ports": 300})
+    result = configio.save_detection_template(str(path), "cgnat", {"scan_horizontal_hosts": 500})
+    assert result["cgnat"] == {"scan_horizontal_hosts": 500}  # scan_vertical_ports não sobrevive
+
+
+def test_save_detection_template_preserves_other_templates(tmp_path):
+    path = tmp_path / "detection_templates.yaml"
+    configio.save_detection_template(str(path), "cgnat", {"scan_horizontal_hosts": 250})
+    result = configio.save_detection_template(str(path), "cdn", {"scan_horizontal_hosts": 15000})
+    assert "cgnat" in result and "cdn" in result
+
+
+def test_save_detection_template_rejects_unknown_key(tmp_path):
+    path = tmp_path / "detection_templates.yaml"
+    with pytest.raises(ValueError):
+        configio.save_detection_template(str(path), "cgnat", {"nao_existe": 1})
+    assert not path.exists()
+
+
+def test_save_detection_template_rejects_non_positive_int(tmp_path):
+    path = tmp_path / "detection_templates.yaml"
+    with pytest.raises(ValueError):
+        configio.save_detection_template(str(path), "cgnat", {"scan_horizontal_hosts": 0})
+    with pytest.raises(ValueError):
+        configio.save_detection_template(str(path), "cgnat", {"scan_horizontal_hosts": "250"})
+
+
+def test_save_detection_template_rejects_bad_name(tmp_path):
+    path = tmp_path / "detection_templates.yaml"
+    with pytest.raises(ValueError):
+        configio.save_detection_template(str(path), "CGNAT Ruim!", {"scan_horizontal_hosts": 250})
+
+
+def test_delete_detection_template_removes_entry(tmp_path):
+    path = tmp_path / "detection_templates.yaml"
+    configio.save_detection_template(str(path), "cgnat", {"scan_horizontal_hosts": 250})
+    configio.save_detection_template(str(path), "cdn", {"scan_horizontal_hosts": 15000})
+    result = configio.delete_detection_template(str(path), "cgnat")
+    assert result == {"cdn": {"scan_horizontal_hosts": 15000}}
+
+
+def test_delete_detection_template_unknown_raises(tmp_path):
+    path = tmp_path / "detection_templates.yaml"
+    configio.save_detection_template(str(path), "cgnat", {"scan_horizontal_hosts": 250})
+    with pytest.raises(ValueError):
+        configio.delete_detection_template(str(path), "nao_existe")
+
+
+# --- detection_overrides.yaml (ajuste fino via portal/CLI) ---------------------
+
+def test_load_detection_overrides_missing_file_returns_empty(tmp_path):
+    assert configio.load_detection_overrides(str(tmp_path / "nao-existe.yaml")) == {}
+
+
+def test_save_detection_overrides_roundtrip(tmp_path):
+    path = tmp_path / "detection_overrides.yaml"
+    result = configio.save_detection_overrides(str(path), {"scan_horizontal_hosts": 80})
+    assert result == {"scan_horizontal_hosts": 80}
+    assert configio.load_detection_overrides(str(path)) == {"scan_horizontal_hosts": 80}
+
+
+def test_save_detection_overrides_applies_all_in_one_write(tmp_path):
+    path = tmp_path / "detection_overrides.yaml"
+    result = configio.save_detection_overrides(str(path), {
+        "scan_horizontal_hosts": 80, "scan_vertical_ports": 200, "amplifier_ports": [53, 123],
+    })
+    assert result["scan_horizontal_hosts"] == 80
+    assert result["amplifier_ports"] == [53, 123]
+
+
+def test_save_detection_overrides_none_value_removes_key(tmp_path):
+    path = tmp_path / "detection_overrides.yaml"
+    configio.save_detection_overrides(str(path), {"scan_horizontal_hosts": 80})
+    result = configio.save_detection_overrides(str(path), {"scan_horizontal_hosts": None})
+    assert "scan_horizontal_hosts" not in result
+
+
+def test_save_detection_overrides_rejects_unknown_key(tmp_path):
+    path = tmp_path / "detection_overrides.yaml"
+    with pytest.raises(ValueError):
+        configio.save_detection_overrides(str(path), {"nao_existe": 1})
+    assert not path.exists()
+
+
+def test_load_detection_overrides_ignores_unknown_keys_from_hand_edited_file(tmp_path):
+    path = tmp_path / "detection_overrides.yaml"
+    path.write_text("scan_horizontal_hosts: 80\nlixo_desconhecido: 1\n")
+    assert configio.load_detection_overrides(str(path)) == {"scan_horizontal_hosts": 80}

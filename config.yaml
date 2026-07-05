@@ -66,6 +66,11 @@ whitelist_file: /root/clientguard/whitelist.yaml
 # detector.py::run_all/_effective_threshold. Arquivo ausente = nenhum template, todo
 # prefixo cai no valor global de detection.* abaixo (mesmo comportamento de antes).
 detection_templates_file: /root/clientguard/detection_templates.yaml
+# ajuste fino dos limiares de detection.* abaixo, editável via portal (aba
+# ClientGuard > Configurações) ou clientguard-cli, aplicado por cima na carga E no
+# reload (sem reiniciar o daemon) — arquivo ausente/vazio = usa os valores abaixo
+# sem ajuste algum.
+detection_overrides_file: /root/clientguard/detection_overrides.yaml
 # liga/desliga cada detector e a explicação por IA, editável via portal (aba
 # ClientGuard > Configurações) ou `clientguard-cli toggles set` — chave ausente
 # ou arquivo inexistente = habilitado (não muda comportamento pra quem não usar isso)

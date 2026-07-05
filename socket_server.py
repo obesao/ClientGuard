@@ -55,6 +55,9 @@ _TOGGLES_LOCK = threading.Lock()
 _EDGE_CFG_LOCK = threading.Lock()
 # idem, pro read-modify-write de flowspec_mitigation.yaml.
 _FLOWSPEC_MITIGATION_CFG_LOCK = threading.Lock()
+# idem, pro read-modify-write de detection_templates.yaml / detection_overrides.yaml.
+_DETECTION_TEMPLATES_LOCK = threading.Lock()
+_DETECTION_OVERRIDES_LOCK = threading.Lock()
 
 WHITELIST_HEADER = (
     "# whitelist.yaml — src_ip/prefixos que NUNCA devem gerar alerta no ClientGuard\n"
@@ -66,7 +69,21 @@ CUSTOMERS_HEADER = (
     "# src_ip do flow é resolvido pro customer_prefix se cair dentro de alguma 'network' aqui\n"
     "# (aceita /32 pra host único ou qualquer CIDR). Se já existir cadastro em outro sistema\n"
     "# (RADIUS, ERP), preferir reusar aquele; este arquivo é o fallback.\n"
-    "# Editável diretamente ou via: clientguard-cli customers add|del <network> <prefix>"
+    "# Editável diretamente, via clientguard-cli customers add|del|edit, ou pelo portal\n"
+    "# (aba ClientGuard > Configurações > Redes de Clientes).\n"
+    "#\n"
+    "# client_multiplier: quantas identidades reais um único src_ip visível desse prefixo pode\n"
+    "# representar combinadas (ex.: pool de CGNAT PÓS-NAT, onde 1 IP público externo = várias\n"
+    "# pessoas atrás do NAT). detector.py escala os limiares de volume/diversidade por esse\n"
+    "# fator pra não confundir tráfego combinado de várias pessoas com o comportamento de 1\n"
+    "# cliente só. Sem o campo (ou valor 1), nenhum ajuste é aplicado.\n"
+    "#\n"
+    "# template: perfil de limiar de detecção (ver detection_templates.yaml) — 'cgnat' pra\n"
+    "# pools com muitos clientes ativos e tráfego residencial diverso (torrent/jogos/VoIP,\n"
+    "# PRÉ ou PÓS-NAT — não precisa de client_multiplier se o NetFlow já captura o IP\n"
+    "# pré-NAT, 1 IP = 1 cliente real), 'cdn' pra infraestrutura própria (core, relay/TURN,\n"
+    "# cache) com fan-out extremo esperado. Sem o campo, o prefixo usa o limiar global de\n"
+    "# detection.* em config.yaml."
 )
 
 
@@ -268,6 +285,29 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         d.reload_config()
         return {"ok": True}
 
+    def _customers_entry_from_request(self, request: dict) -> tuple[dict | None, str]:
+        """Monta os campos opcionais (name/client_multiplier/template) comuns a
+        customers_add/customers_edit, com a mesma validação nos dois — template
+        precisa existir em detection_templates.yaml (erro claro em vez de silenciosamente
+        cair no limiar global por um nome digitado errado)."""
+        entry: dict = {}
+        if request.get("name"):
+            entry["name"] = request["name"]
+        if "client_multiplier" in request and request["client_multiplier"] not in (None, ""):
+            try:
+                multiplier = int(request["client_multiplier"])
+            except (TypeError, ValueError):
+                return None, "client_multiplier deve ser um inteiro"
+            if multiplier < 1:
+                return None, "client_multiplier deve ser >= 1"
+            entry["client_multiplier"] = multiplier
+        if "template" in request and request["template"]:
+            template_name = request["template"]
+            if template_name not in self.daemon_ref.detection_templates:
+                return None, f"template '{template_name}' não existe"
+            entry["template"] = template_name
+        return entry, ""
+
     def _cmd_customers_add(self, request: dict) -> dict:
         network = request.get("network")
         prefix = request.get("prefix")
@@ -277,18 +317,46 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
             ipaddress.ip_network(network, strict=False)
         except ValueError:
             return {"ok": False, "error": f"network inválida: {network}"}
+        extra, err = self._customers_entry_from_request(request)
+        if err:
+            return {"ok": False, "error": err}
         d = self.daemon_ref
         path = d.config["customer_registry"]
         items = configio.load_yaml_list(path)
         if any(entry.get("network") == network for entry in items):
             return {"ok": False, "error": "network já cadastrada"}
-        entry = {"network": network, "prefix": prefix}
-        if request.get("name"):
-            entry["name"] = request["name"]
+        entry = {"network": network, "prefix": prefix, **extra}
         items.append(entry)
         configio.save_yaml_list(path, items, header_comment=CUSTOMERS_HEADER)
         d.reload_config()
         return {"ok": True}
+
+    def _cmd_customers_edit(self, request: dict) -> dict:
+        """Atualiza name/client_multiplier/template de uma network JÁ cadastrada, sem
+        precisar del+add (que perderia o histórico de ordem no arquivo e exigiria
+        redigitar network/prefix). Passar client_multiplier/template vazio ("" ou null)
+        REMOVE o campo — volta pro comportamento sem ajuste (multiplier=1, sem template)."""
+        network = request.get("network")
+        if not network:
+            return {"ok": False, "error": "network obrigatória"}
+        extra, err = self._customers_entry_from_request(request)
+        if err:
+            return {"ok": False, "error": err}
+        d = self.daemon_ref
+        path = d.config["customer_registry"]
+        items = configio.load_yaml_list(path)
+        entry = next((e for e in items if e.get("network") == network), None)
+        if entry is None:
+            return {"ok": False, "error": "network não cadastrada"}
+        for key in ("name", "client_multiplier", "template"):
+            if key in request:
+                if key in extra:
+                    entry[key] = extra[key]
+                else:
+                    entry.pop(key, None)
+        configio.save_yaml_list(path, items, header_comment=CUSTOMERS_HEADER)
+        d.reload_config()
+        return {"ok": True, "entry": entry}
 
     def _cmd_customers_del(self, request: dict) -> dict:
         network = request.get("network")
@@ -519,6 +587,58 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         return {"ok": True, "config": {
             "auto_mitigate": updated.get("auto_mitigate", {}), "default_ttl_s": updated.get("default_ttl_s"),
         }}
+
+    # --- ajuste fino dos limiares de detecção (detection.* de config.yaml) e dos
+    # templates de perfil de rede (cgnat/cdn, ver detection_templates.yaml) ---------
+
+    def _cmd_detection_cfg(self, request: dict) -> dict:
+        return {"ok": True, "detection": self.daemon_ref.config["detection"]}
+
+    def _cmd_detection_cfg_set(self, request: dict) -> dict:
+        changes = request.get("changes")
+        if not isinstance(changes, dict) or not changes:
+            return {"ok": False, "error": "changes (objeto não vazio) obrigatório"}
+        d = self.daemon_ref
+        path = d.config.get("detection_overrides_file", configio.DEFAULT_DETECTION_OVERRIDES_PATH)
+        try:
+            with _DETECTION_OVERRIDES_LOCK:
+                configio.save_detection_overrides(path, changes)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        d.reload_config()
+        return {"ok": True, "detection": d.config["detection"]}
+
+    def _cmd_detection_templates(self, request: dict) -> dict:
+        return {"ok": True, "templates": self.daemon_ref.detection_templates}
+
+    def _cmd_detection_templates_set(self, request: dict) -> dict:
+        name = (request.get("name") or "").strip()
+        values = request.get("values")
+        if not name or not isinstance(values, dict) or not values:
+            return {"ok": False, "error": "name e values (objeto não vazio) obrigatórios"}
+        d = self.daemon_ref
+        path = d.config.get("detection_templates_file", configio.DEFAULT_DETECTION_TEMPLATES_PATH)
+        try:
+            with _DETECTION_TEMPLATES_LOCK:
+                updated = configio.save_detection_template(path, name, values, request.get("description", ""))
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        d.reload_config()
+        return {"ok": True, "templates": updated}
+
+    def _cmd_detection_templates_del(self, request: dict) -> dict:
+        name = (request.get("name") or "").strip()
+        if not name:
+            return {"ok": False, "error": "name obrigatório"}
+        d = self.daemon_ref
+        path = d.config.get("detection_templates_file", configio.DEFAULT_DETECTION_TEMPLATES_PATH)
+        try:
+            with _DETECTION_TEMPLATES_LOCK:
+                updated = configio.delete_detection_template(path, name)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        d.reload_config()
+        return {"ok": True, "templates": updated}
 
     def _cmd_reload(self, request: dict) -> dict:
         self.daemon_ref.reload_config()

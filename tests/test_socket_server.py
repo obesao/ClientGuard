@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import configio
 import edge_mitigation
 import flowspec_mitigation
 import socket_server
@@ -31,19 +32,30 @@ class FakeDaemon:
             "flowguard_socket": "/var/run/flowguard.sock",
             "flowguard_reuse": {"path": str(tmp_path / "flowguard")},
             "edge_mitigation_file": str(tmp_path / "edge_mitigation.yaml"),
+            "customer_registry": str(tmp_path / "customers.yaml"),
+            "detection_templates_file": str(tmp_path / "detection_templates.yaml"),
+            "detection_overrides_file": str(tmp_path / "detection_overrides.yaml"),
             "database": {"aggregate_interval_s": 30, "path": str(tmp_path / "client_flow.sqlite")},
             "capture": {"iface": "ens18", "bpf_filter": "udp port 2055"},
+            "detection": {"scan_horizontal_hosts": 50, "scan_vertical_ports": 150},
         }
         self.edge_cfg = edge_mitigation.load_config(self.config["edge_mitigation_file"])
         self.edge_cfg["warmode_device"] = "NE8000 borda"
         self.flowspec_mitigation_cfg = flowspec_mitigation.load_config(
             str(tmp_path / "flowspec_mitigation.yaml"))
+        self.detection_templates = configio.load_detection_templates(self.config["detection_templates_file"])
+        self._detection_base = dict(self.config["detection"])
         self.toggles = {}
         self.reload_calls = 0
 
     def reload_config(self):
         self.reload_calls += 1
         self.edge_cfg = edge_mitigation.load_config(self.config["edge_mitigation_file"])
+        self.detection_templates = configio.load_detection_templates(self.config["detection_templates_file"])
+        self.config["detection"] = {
+            **self._detection_base,
+            **configio.load_detection_overrides(self.config["detection_overrides_file"]),
+        }
 
 
 def _write_warmode_yaml(tmp_path):
@@ -406,3 +418,118 @@ def test_suspicious_only_matches_mitigation_by_same_src_ip(server, conn):
                                     mechanism="flowspec", flowspec_rule_id=42)
     resp = server.dispatch({"cmd": "suspicious"})
     assert resp["suspicious"][0]["mitigation"] is None
+
+
+# --- ajuste fino dos limiares de detecção (config.yaml::detection) ------------
+
+def test_detection_cfg_returns_effective_values(server):
+    resp = server.dispatch({"cmd": "detection_cfg"})
+    assert resp == {"ok": True, "detection": {"scan_horizontal_hosts": 50, "scan_vertical_ports": 150}}
+
+
+def test_detection_cfg_set_applies_override_and_reloads(server):
+    resp = server.dispatch({"cmd": "detection_cfg_set", "changes": {"scan_horizontal_hosts": 80}})
+    assert resp["ok"] is True
+    assert resp["detection"]["scan_horizontal_hosts"] == 80
+    assert resp["detection"]["scan_vertical_ports"] == 150  # não mexido, continua o global
+    assert server.daemon_ref.reload_calls == 1
+
+
+def test_detection_cfg_set_requires_non_empty_changes(server):
+    resp = server.dispatch({"cmd": "detection_cfg_set", "changes": {}})
+    assert resp["ok"] is False
+
+
+def test_detection_cfg_set_rejects_unknown_key(server):
+    resp = server.dispatch({"cmd": "detection_cfg_set", "changes": {"nao_existe": 1}})
+    assert resp["ok"] is False
+    assert server.daemon_ref.reload_calls == 0  # falhou antes de aplicar, não recarrega à toa
+
+
+def test_detection_cfg_set_persists_across_dispatches(server):
+    server.dispatch({"cmd": "detection_cfg_set", "changes": {"scan_horizontal_hosts": 80}})
+    resp = server.dispatch({"cmd": "detection_cfg"})
+    assert resp["detection"]["scan_horizontal_hosts"] == 80
+
+
+# --- templates de perfil de rede (detection_templates.yaml) -------------------
+
+def test_detection_templates_empty_by_default(server):
+    resp = server.dispatch({"cmd": "detection_templates"})
+    assert resp == {"ok": True, "templates": {}}
+
+
+def test_detection_templates_set_creates_and_reloads(server):
+    resp = server.dispatch({
+        "cmd": "detection_templates_set", "name": "cgnat",
+        "values": {"scan_horizontal_hosts": 250, "scan_vertical_ports": 300},
+        "description": "pool CGNAT",
+    })
+    assert resp["ok"] is True
+    assert resp["templates"]["cgnat"]["scan_horizontal_hosts"] == 250
+    assert server.daemon_ref.reload_calls == 1
+    assert server.daemon_ref.detection_templates["cgnat"]["scan_horizontal_hosts"] == 250
+
+
+def test_detection_templates_set_rejects_bad_values(server):
+    resp = server.dispatch({
+        "cmd": "detection_templates_set", "name": "cgnat", "values": {"scan_horizontal_hosts": -1},
+    })
+    assert resp["ok"] is False
+
+
+def test_detection_templates_del_removes_and_reloads(server):
+    server.dispatch({"cmd": "detection_templates_set", "name": "cgnat", "values": {"scan_horizontal_hosts": 250}})
+    resp = server.dispatch({"cmd": "detection_templates_del", "name": "cgnat"})
+    assert resp["ok"] is True
+    assert "cgnat" not in resp["templates"]
+    assert "cgnat" not in server.daemon_ref.detection_templates
+
+
+def test_detection_templates_del_unknown_fails(server):
+    resp = server.dispatch({"cmd": "detection_templates_del", "name": "nao_existe"})
+    assert resp["ok"] is False
+
+
+# --- customers_add/customers_edit com template/client_multiplier ---------------
+
+def test_customers_add_with_template_and_multiplier(server):
+    server.dispatch({"cmd": "detection_templates_set", "name": "cgnat", "values": {"scan_horizontal_hosts": 250}})
+    resp = server.dispatch({
+        "cmd": "customers_add", "network": "100.64.0.0/10", "prefix": "100.64.0.0/10",
+        "template": "cgnat", "client_multiplier": 4,
+    })
+    assert resp["ok"] is True
+    items = configio.load_yaml_list(server.daemon_ref.config["customer_registry"])
+    assert items[0]["template"] == "cgnat"
+    assert items[0]["client_multiplier"] == 4
+
+
+def test_customers_add_rejects_unknown_template(server):
+    resp = server.dispatch({
+        "cmd": "customers_add", "network": "100.64.0.0/10", "prefix": "100.64.0.0/10", "template": "nao_existe",
+    })
+    assert resp["ok"] is False
+
+
+def test_customers_edit_sets_template_on_existing_entry(server):
+    server.dispatch({"cmd": "customers_add", "network": "177.86.20.0/24", "prefix": "177.86.20.0/24"})
+    server.dispatch({"cmd": "detection_templates_set", "name": "cgnat", "values": {"scan_horizontal_hosts": 250}})
+    resp = server.dispatch({"cmd": "customers_edit", "network": "177.86.20.0/24", "template": "cgnat"})
+    assert resp["ok"] is True
+    assert resp["entry"]["template"] == "cgnat"
+
+
+def test_customers_edit_clears_template_with_empty_value(server):
+    server.dispatch({"cmd": "detection_templates_set", "name": "cgnat", "values": {"scan_horizontal_hosts": 250}})
+    server.dispatch({
+        "cmd": "customers_add", "network": "177.86.20.0/24", "prefix": "177.86.20.0/24", "template": "cgnat",
+    })
+    resp = server.dispatch({"cmd": "customers_edit", "network": "177.86.20.0/24", "template": ""})
+    assert resp["ok"] is True
+    assert "template" not in resp["entry"]
+
+
+def test_customers_edit_unknown_network_fails(server):
+    resp = server.dispatch({"cmd": "customers_edit", "network": "9.9.9.0/24", "template": "cgnat"})
+    assert resp["ok"] is False

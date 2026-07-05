@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.28.0**
+**Versão atual: v1.29.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,45 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.29.0 — 2026-07-05 — Ajuste fino de limiares e templates via backend/socket
+Pedido do usuário: expor "estas novas configurações" (limiares de detecção da
+v1.27.0 + templates cgnat/cdn da v1.28.0) editáveis via portal, com ajuste
+fino sem precisar mexer em YAML na mão. Esta entrada é a camada de backend;
+a UI do portal entra em commit próprio no repositório do site.
+
+**Novo mecanismo de override, sem tocar em config.yaml**: `detection_overrides.yaml`
+(novo, vazio por padrão) guarda só as chaves que o operador realmente ajustou —
+aplicado por cima de `config.yaml::detection` na carga E no `reload` (comando
+`clientguard-cli reload` ou qualquer ação que já disparava `reload_config`),
+**sem precisar reiniciar o daemon**. `config.yaml` continua sendo a fonte dos
+valores padrão/documentados; o override é só a camada de ajuste pontual, mesmo
+espírito de `toggles.yaml`/`edge_mitigation.yaml`.
+
+**Templates ganham CRUD completo**: `configio.save_detection_template`/
+`delete_detection_template` — salvar com um nome já existente SUBSTITUI o
+template inteiro (não é mescla de campo), validação de nome (slug minúsculo)
+e de valores (inteiro positivo).
+
+**Novos comandos no socket** (`socket_server.py`): `detection_cfg` (GET),
+`detection_cfg_set` (aplica override + reload), `detection_templates` (GET),
+`detection_templates_set`/`detection_templates_del` (CRUD + reload).
+`customers_add` ganha `template`/`client_multiplier` opcionais (valida que o
+template citado existe); novo `customers_edit` atualiza `name`/
+`client_multiplier`/`template` de uma rede JÁ cadastrada sem precisar
+del+add — passar valor vazio remove o campo (volta ao comportamento padrão).
+
+**Achado ao implementar**: `customers_add/del` e agora `detection_templates_set/
+del` reescrevem o arquivo inteiro a cada chamada (mesmo padrão de
+`save_feature_toggles`) — os cabeçalhos-comentário (`CUSTOMERS_HEADER`/
+`DETECTION_TEMPLATES_HEADER`) precisaram ser enriquecidos com a documentação
+completa de `client_multiplier`/`template`/ordem de precedência, senão a
+primeira edição via portal apagava silenciosamente esses comentários
+(reproduzido e corrigido ainda nesta leva).
+
+29 testes novos (`test_configio.py`, `test_socket_server.py`) cobrindo o
+CRUD de templates, o override read-modify-write, e `customers_edit`
+(incluindo limpar campo com valor vazio e rejeitar template inexistente).
 
 ### v1.28.0 — 2026-07-05 — Templates de limiar por perfil de rede (cgnat/cdn)
 Pedido do usuário: depois de aprender o tráfego real (v1.27.0), gerar templates
