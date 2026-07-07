@@ -19,9 +19,9 @@
 # detection.* em config.yaml.
 - network: 177.86.16.0/24
   prefix: 177.86.16.0/24
-  template: cdn
 - network: 177.86.17.0/24
   prefix: 177.86.17.0/24
+  template: cdn
 - network: 177.86.18.0/24
   prefix: 177.86.18.0/24
 - network: 177.86.19.0/24

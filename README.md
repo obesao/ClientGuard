@@ -98,6 +98,13 @@ clientguard-cli toggles set <funcao> on|off
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
 
+### v1.29.1 — 2026-07-07 — Ajuste operacional: template cdn migra de 16 pra 17, IA de explicação desligada
+`customers.yaml`: template `cdn` sai de `177.86.16.0/24` e passa pra
+`177.86.17.0/24` — decisão operacional do usuário, sem mudança de código.
+`toggles.yaml`: `ai_explanations` desligado (consistente com a IA estar sem
+crédito na conta Anthropic — ver CHANGELOG do `flowguard` v1.27.0 — evita
+tentativa de chamada que só vai falhar).
+
 ### v1.29.0 — 2026-07-05 — Ajuste fino de limiares e templates via backend/socket
 Pedido do usuário: expor "estas novas configurações" (limiares de detecção da
 v1.27.0 + templates cgnat/cdn da v1.28.0) editáveis via portal, com ajuste

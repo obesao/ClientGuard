@@ -8,4 +8,4 @@ spam: true
 malicious_contact: false
 coordinated_destination: false
 dns_tunneling: true
-ai_explanations: true
+ai_explanations: false
