@@ -404,6 +404,26 @@ def client_usage_timeseries(conn: sqlite3.Connection, src_ip: str, window_s: int
     return [{"ts": r["bucket"], "bps": (r["bytes"] * 8) / bucket_s} for r in rows]
 
 
+def network_usage_timeseries(conn: sqlite3.Connection, customer_prefix: str, window_s: int, bucket_s: int) -> list[dict]:
+    """Série temporal de tráfego (bps) agregada por REDE inteira (customer_prefix,
+    ex: CGNAT) — soma todos os src_ips que caíram nessa rede na ingestão, não só
+    um cliente. NÃO tem índice dedicado (customer_prefix não é seletivo pra redes
+    grandes como CGNAT, e client_flow_aggs tem 280M+ linhas — ver achado de
+    2026-07-08 sobre esse volume); usa o range scan de idx_client_flow_ts, medido
+    em produção: 1h~0.6s, 6h~4.2s, 24h+ inviável (minutos, não terminou em teste).
+    Por isso o frontend só oferece 1h/6h pra redes do ClientGuard por enquanto —
+    ver CHANGELOG. Não usar com window_s grande sem antes resolver o índice/o
+    volume da tabela."""
+    since = int(time.time()) - window_s
+    rows = conn.execute(
+        """SELECT (ts / ?) * ? AS bucket, SUM(bytes) AS bytes
+           FROM client_flow_aggs WHERE customer_prefix = ? AND ts >= ?
+           GROUP BY bucket ORDER BY bucket""",
+        (bucket_s, bucket_s, customer_prefix, since),
+    ).fetchall()
+    return [{"ts": r["bucket"], "bps": (r["bytes"] * 8) / bucket_s} for r in rows]
+
+
 # --- mitigação direta na borda (SSH/ACL) ----------------------------------
 
 def insert_edge_mitigation(conn: sqlite3.Connection, src_ip: str, signal_id: int | None,

@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.29.0**
+**Versão atual: v1.30.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,53 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.30.0 — 2026-07-08 — Série temporal de tráfego por rede inteira (pro gráfico do portal)
+
+Pedido do usuário: a rede CGNAT não aparecia nos gráficos do portal. Causa:
+o gráfico de tráfego (aba Gráficos do `flowguard-portal`) só falava com o
+FlowGuard (`flow_aggs`, agregado por prefixo PROTEGIDO); o ClientGuard só
+tinha série temporal por `src_ip` individual (`client_detail`), nunca por
+`customer_prefix` inteiro. Novo comando de socket `network_series`
+(`socket_server.py`) + `storage.network_usage_timeseries()`, mesmo padrão de
+`client_usage_timeseries` trocando `src_ip` por `customer_prefix` — soma
+todos os clientes daquela rede por bucket de tempo.
+
+**Achado real e não trivial durante a implementação**: `client_flow_aggs`
+tem **280 milhões de linhas / 42GB** hoje — quase 10x mais que os ~26-30M
+registrados há 6 dias (checkpoint de 2026-07-02, ver CHANGELOG daquela
+versão). Investigado a fundo (só leitura, nada alterado): **não é bug de
+cardinalidade** — `bucket_client_port` (fix de 2026-07-02) segue
+funcionando, `src_port` hoje só assume 2 valores reais na amostra
+verificada. A causa real são dois commits operacionais de 2026-07-03
+(`cc1bbe5`/`e7a6847`, troca de feed capturado, só PPPoE sem sampling) que
+derrubaram "sem cliente identificado" de ~90% pra ~0% — quase todo tráfego
+que antes era descartado silenciosamente (não virava linha) agora é
+atribuído e gravado de verdade. A baseline de 30M foi medida ANTES dessa
+troca; comparar direto contra o volume de hoje não é comparação justa.
+`dst_port`/`dst_ip` não têm folga pra bucketizar como o `bucket_client_port`
+fez com a porta do cliente — `scan_horizontal`/`scan_vertical`/
+`coordinated_destination` dependem exatamente dessa granularidade pra
+funcionar. **Não é bug, é o novo patamar real de volume** — decisão de
+capacidade (reduzir retenção de 7 dias, ou pré-agregação por hora/dia só
+pro portal, separada da granularidade fina que a detecção usa — já cogitada
+no checkpoint de 2026-07-02, ainda não feita) fica como pendência própria,
+fora do escopo desta mudança.
+
+**Por isso**: `network_usage_timeseries()` não ganhou índice dedicado por
+`customer_prefix` nesta versão — cheguei a adicionar um `CREATE INDEX
+idx_client_flow_customer` no schema, mas revertido antes de commitar: numa
+tabela de 280M linhas, construir esse índice ao vivo travaria as escritas
+do daemon por um tempo não estimado (SQLite não suporta index build
+concorrente), sem stress-test em ambiente controlado antes. Medido direto
+(read-only, sem índice): janela de 1h ~0.6s, 6h ~4.2s (aceitável, usa o
+range scan do índice de `ts` já existente sobre uma fatia pequena da
+retenção) — 24h não terminou em 3+ minutos de teste, matada. O
+`flowguard-portal` (ver CHANGELOG de lá) por isso só oferece 1h/6h pra
+redes do ClientGuard no seletor de gráfico; 24h/7d ficam desabilitadas até
+o índice ser construído num momento controlado (ou o volume da tabela ser
+endereçado à parte). Serviço reiniciado em produção sem downtime
+perceptível (só código novo, sem migração de schema desta vez).
 
 ### v1.29.1 — 2026-07-07 — Ajuste operacional: template cdn migra de 16 pra 17, IA de explicação desligada
 `customers.yaml`: template `cdn` sai de `177.86.16.0/24` e passa pra

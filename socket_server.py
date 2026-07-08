@@ -190,6 +190,17 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
             top_destinations = storage.client_top_destinations(rconn, src_ip, window_s, limit=10)
         return {"ok": True, "timeseries": timeseries, "top_destinations": top_destinations}
 
+    def _cmd_network_series(self, request: dict) -> dict:
+        customer_prefix = request.get("customer_prefix")
+        if not customer_prefix:
+            return {"ok": False, "error": "customer_prefix obrigatório"}
+        d = self.daemon_ref
+        window_s = int(request.get("window_s") or d.config["database"]["aggregate_interval_s"])
+        bucket_s = _bucket_for_window(window_s)
+        with self._read_conn() as rconn:
+            timeseries = storage.network_usage_timeseries(rconn, customer_prefix, window_s, bucket_s)
+        return {"ok": True, "timeseries": timeseries}
+
     def _cmd_suspicious(self, request: dict) -> dict:
         resolved = bool(request.get("history", False))
         since_s = int(request.get("since_s", 86400))
