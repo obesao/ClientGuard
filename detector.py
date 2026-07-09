@@ -313,10 +313,15 @@ def detect_spam(conn: sqlite3.Connection, window_s: int, spam_ports: list[int], 
         effective = _scaled_threshold(min_distinct_dest, r["customer_prefix"], multipliers)
         if r["n_dst"] < effective:
             continue
+        # mitigation_match escopa o bloqueio às portas de e-mail (ExaBGP aceita N
+        # tokens "=porta" no mesmo campo, casados por OR) — sem isso, discard
+        # bloquearia o cliente INTEIRO (spam_bot não tem 1 destino único pra
+        # escopar como os outros, mas TEM um conjunto fixo de portas conhecido).
         _record_signal(conn, r["src_ip"], r["customer_prefix"], "spam_bot",
                         min(1.0, r["n_dst"] / (effective * 2)),
                         {"n_dst": r["n_dst"], "window_s": window_s},
-                        webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx)
+                        webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx,
+                        {"protocol": "tcp", "dst_port": " ".join(f"={p}" for p in spam_ports)})
 
 
 def detect_malicious_contact(conn: sqlite3.Connection, window_s: int, threat_feed, whitelist: set,

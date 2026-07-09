@@ -569,6 +569,22 @@ def test_scan_vertical_triggers_mitigation_with_dst_prefix_match(conn, monkeypat
     assert args[5] == {"dst_prefix": "45.10.0.1/32"}
 
 
+def test_spam_triggers_mitigation_with_email_ports_match(conn, monkeypatch):
+    calls = []
+    monkeypatch.setattr("flowspec_mitigation.trigger_async", lambda *a, **k: calls.append((a, k)))
+    for i in range(20):
+        insert_flow(conn, "177.86.19.97", f"203.0.{i}.1", 25, protocol=6)
+    cfg = {"auto_mitigate": {"spam_bot": "discard"}}
+    detector.detect_spam(conn, WINDOW_S, spam_ports=[25, 465, 587], min_distinct_dest=20,
+                          whitelist=set(), mitigation_ctx={"cfg": cfg, "fg_socket_path": "/fake.sock"})
+    assert len(calls) == 1
+    args, _ = calls[0]
+    assert args[4] == "spam_bot"
+    # escopado às portas de e-mail — não bloqueia/limita o cliente pra qualquer
+    # destino, só o tráfego nessas 3 portas (ver detector.py:detect_spam)
+    assert args[5] == {"protocol": "tcp", "dst_port": "=25 =465 =587"}
+
+
 def test_off_action_does_not_call_trigger_async(conn, monkeypatch):
     calls = []
     monkeypatch.setattr("flowspec_mitigation.trigger_async", lambda *a, **k: calls.append((a, k)))
