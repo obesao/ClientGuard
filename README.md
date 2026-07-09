@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.30.0**
+**Versão atual: v1.31.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,46 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.31.0 — 2026-07-08 — Liga malicious_contact/coordinated_destination + bloqueio progressivo por reincidência
+
+Pedido do usuário, no seguimento de uma revisão de proteção: os 2 detectores
+que faltavam ligar (`malicious_contact`, `coordinated_destination` —
+implementados há tempos, sempre desligados em `toggles.yaml` e
+`flowspec_mitigation.yaml`) + escalonamento progressivo de bloqueio (estilo
+fail2ban) pros 7 detectores.
+
+**Achado real que bloqueava ligar isso com segurança**: `detect_malicious_contact`
+e `detect_shared_destination` nunca passavam `mitigation_match` pra
+`_record_signal` — diferente de `detect_dns_tunneling`, que já tinha essa
+correção (bug real de 2026-07-03, ver changelog antigo). Sem o `mitigation_match`,
+ligar `auto_mitigate: discard` nesses dois bloquearia o cliente **inteiro**
+(qualquer destino) só por ele ter tocado 1 IP de threat feed ou participado de
+1 grupo de destino coordenado — falso positivo caro (derruba a internet do
+cliente). Corrigido primeiro: os dois agora escopam a regra FlowSpec ao
+destino específico (`dst_prefix=<ip malicioso>/32` / `dst_prefix=<destino
+coordenado>/32` + `dst_port`), mesmo padrão que já existia pro túnel DNS.
+Só depois disso `toggles.yaml`/`flowspec_mitigation.yaml` foram ligados de
+fato (`discard` nos dois).
+
+**Bloqueio progressivo** (`escalation.py`, novo): TTL da próxima mitigação de
+um `src_ip` = `base_ttl_s * factor ^ min(reincidências, max_steps)`, até o
+teto `max_ttl_s`. Reincidência contada via `edge_mitigations` (histórico
+nunca deletado, mecanismo-agnóstico — conta SSH legado e FlowSpec juntos).
+Hook único em `flowspec_mitigation.trigger_async` (o único caminho automático
+real — a rota manual do portal/CLI continua com TTL escolhido pelo
+operador), cobrindo os 7 detectores de uma vez sem tocar em cada um
+individualmente. Novo `escalation.yaml`. Socket
+(`_cmd_escalation_config`/`_cmd_escalation_set_config`), CLI
+(`clientguard-cli escalation list|set`) e portal (nova seção "Bloqueio
+Progressivo" na aba ClientGuard) seguem o padrão já existente de
+`flowspec_mitigation_config`/`edge_set_auto`. 16 testes novos
+(`test_escalation.py` + 2 em `test_detector.py` pro scoping do
+`mitigation_match`), 282 no total, todos passando.
+
+**Rollout recomendado**: ligar os toggles e observar `suspicious_clients`
+por um tempo antes de armar o bloqueio automático de fato — mesma prática já
+usada nesta sessão pros outros detectores.
 
 ### v1.30.0 — 2026-07-08 — Série temporal de tráfego por rede inteira (pro gráfico do portal)
 

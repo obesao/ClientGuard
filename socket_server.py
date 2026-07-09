@@ -19,6 +19,7 @@ from pathlib import Path
 import configio
 import control
 import edge_mitigation
+import escalation
 import flowspec_mitigation
 import storage
 
@@ -58,6 +59,8 @@ _FLOWSPEC_MITIGATION_CFG_LOCK = threading.Lock()
 # idem, pro read-modify-write de detection_templates.yaml / detection_overrides.yaml.
 _DETECTION_TEMPLATES_LOCK = threading.Lock()
 _DETECTION_OVERRIDES_LOCK = threading.Lock()
+# idem, pro read-modify-write de escalation.yaml.
+_ESCALATION_CFG_LOCK = threading.Lock()
 
 WHITELIST_HEADER = (
     "# whitelist.yaml — src_ip/prefixos que NUNCA devem gerar alerta no ClientGuard\n"
@@ -598,6 +601,25 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         return {"ok": True, "config": {
             "auto_mitigate": updated.get("auto_mitigate", {}), "default_ttl_s": updated.get("default_ttl_s"),
         }}
+
+    # --- bloqueio progressivo por reincidência (comum aos 7 detectores) -------------
+
+    def _cmd_escalation_config(self, request: dict) -> dict:
+        return {"ok": True, "escalation": self.daemon_ref.escalation_cfg}
+
+    def _cmd_escalation_set_config(self, request: dict) -> dict:
+        changes = request.get("changes")
+        if not isinstance(changes, dict) or not changes:
+            return {"ok": False, "error": "changes (objeto não vazio) obrigatório"}
+        d = self.daemon_ref
+        path = d.config.get("escalation_file", escalation.DEFAULT_CONFIG_PATH)
+        try:
+            with _ESCALATION_CFG_LOCK:
+                updated = escalation.save_config(changes, path)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        d.reload_config()
+        return {"ok": True, "escalation": updated}
 
     # --- ajuste fino dos limiares de detecção (detection.* de config.yaml) e dos
     # templates de perfil de rede (cgnat/cdn, ver detection_templates.yaml) ---------

@@ -15,8 +15,8 @@ auto_mitigate:
   spam_bot: discard
   dns_tunneling: discard
   amplifier_hosted: discard
-  malicious_contact: 'off'
-  coordinated_destination: 'off'
+  malicious_contact: discard
+  coordinated_destination: discard
 pbr_bypass:
   enabled: true
   warmode_device: HUAWEI-PPPOE-222

@@ -497,6 +497,16 @@ def count_active_edge_mitigations(conn: sqlite3.Connection, mechanism: str) -> i
     ).fetchone()[0]
 
 
+def count_recent_mitigations(conn: sqlite3.Connection, src_ip: str, since_ts: int) -> int:
+    """Quantas vezes src_ip já foi mitigado (qualquer mecanismo — ssh ou flowspec,
+    qualquer status) desde since_ts — fonte de histórico pro escalonamento
+    progressivo (ver escalation.py::next_ttl_s). edge_mitigations nunca deleta
+    linha, então isso inclui mitigações já revertidas/expiradas, não só as ativas."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM edge_mitigations WHERE src_ip = ? AND ts_applied >= ?", (src_ip, since_ts),
+    ).fetchone()[0]
+
+
 def list_due_edge_mitigations(conn: sqlite3.Connection, mechanism: str | None = None) -> list[dict]:
     """mechanism opcional restringe a expiração a um caminho só ('ssh' ou 'flowspec') —
     os dois módulos de mitigação rodam expire_due independentemente, cada um só

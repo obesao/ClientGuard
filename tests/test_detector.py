@@ -581,6 +581,40 @@ def test_off_action_does_not_call_trigger_async(conn, monkeypatch):
     assert not calls
 
 
+# achado 2026-07-08: malicious_contact/coordinated_destination nunca passavam
+# mitigation_match — ligar auto_mitigate=discard bloquearia o cliente INTEIRO
+# (qualquer destino), não só o IP malicioso/destino coordenado específico.
+def test_malicious_contact_triggers_mitigation_scoped_to_dst_ip(conn, monkeypatch):
+    calls = []
+    monkeypatch.setattr("flowspec_mitigation.trigger_async", lambda *a, **k: calls.append((a, k)))
+    feed = threat_feed.ThreatFeed(":memory-nao-existe:")
+    feed._single_ips = {"198.51.100.50"}
+    insert_flow(conn, "177.86.19.98", "198.51.100.50", 443, protocol=6)
+    cfg = {"auto_mitigate": {"malicious_contact": "discard"}}
+    detector.detect_malicious_contact(conn, WINDOW_S, feed, whitelist=set(),
+                                       mitigation_ctx={"cfg": cfg, "fg_socket_path": "/fake.sock"})
+    assert len(calls) == 1
+    args, _ = calls[0]
+    assert args[4] == "malicious_contact"
+    assert args[5] == {"dst_prefix": "198.51.100.50/32"}
+
+
+def test_coordinated_destination_triggers_mitigation_scoped_to_dst(conn, monkeypatch):
+    calls = []
+    monkeypatch.setattr("flowspec_mitigation.trigger_async", lambda *a, **k: calls.append((a, k)))
+    srcs = [f"177.86.19.{100 + i}" for i in range(8)]
+    for i, src in enumerate(srcs):
+        insert_flow(conn, src, "198.51.100.60", 9999, protocol=6, src_port=50000 + i)
+    cfg = {"auto_mitigate": {"coordinated_destination": "discard"}}
+    detector.detect_shared_destination(conn, WINDOW_S, min_distinct_clients=8, exclude_ports=[],
+                                        whitelist=set(),
+                                        mitigation_ctx={"cfg": cfg, "fg_socket_path": "/fake.sock"})
+    assert len(calls) == 8
+    args, _ = calls[0]
+    assert args[4] == "coordinated_destination"
+    assert args[5] == {"dst_prefix": "198.51.100.60/32", "dst_port": "9999"}
+
+
 # --- redispara mitigação em sinal contínuo sem proteção ativa (achado real de
 # auditoria, 2026-07-04): flowguard.service reiniciar apaga a mitigação real
 # sem avisar o ClientGuard; sem isso, um cliente que continua abusando com o

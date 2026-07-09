@@ -395,6 +395,36 @@ def cmd_edge_auto_set(args: argparse.Namespace, sock_path: str) -> None:
     _print_simple(resp, ok_message=f"auto-mitigação de borda: {args.detector} = {args.value}")
 
 
+def cmd_escalation_list(args: argparse.Namespace, sock_path: str) -> None:
+    resp = send_command(sock_path, {"cmd": "escalation_config"})
+    die_on_error(resp)
+    table = Table(title="Bloqueio progressivo por reincidência (7 detectores)")
+    table.add_column("Chave")
+    table.add_column("Valor")
+    for key, value in resp["escalation"].items():
+        table.add_row(key, str(value))
+    console.print(table)
+    console.print("[dim]base_ttl_s vazio/null usa flowspec_mitigation.yaml::default_ttl_s "
+                   "como base da 1ª ofensa[/dim]")
+
+
+def cmd_escalation_set(args: argparse.Namespace, sock_path: str) -> None:
+    fields: dict = {}
+    if args.enabled is not None:
+        fields["enabled"] = args.enabled == "on"
+    for name in ("tracking_window_s", "base_ttl_s", "max_ttl_s", "max_steps"):
+        value = getattr(args, name)
+        if value is not None:
+            fields[name] = value
+    if args.factor is not None:
+        fields["factor"] = args.factor
+    if not fields:
+        console.print("[red]informe pelo menos uma opção (--enabled/--base-ttl-s/--factor/...)[/red]")
+        return
+    resp = send_command(sock_path, {"cmd": "escalation_set_config", "changes": fields})
+    _print_simple(resp, ok_message=f"escalation: {fields}")
+
+
 def cmd_reload(args: argparse.Namespace, sock_path: str) -> None:
     resp = send_command(sock_path, {"cmd": "reload"})
     _print_simple(resp, ok_message="config recarregado (clientes e whitelist)")
@@ -553,6 +583,18 @@ def main() -> None:
     p_edge_auto_set.add_argument("detector", choices=sorted(edge_mitigation.DEFAULT_CONFIG["auto_mitigate"]))
     p_edge_auto_set.add_argument("value", choices=["on", "off"])
     p_edge_auto_set.set_defaults(func=cmd_edge_auto_set)
+
+    p_escalation = sub.add_parser("escalation", help="bloqueio progressivo por reincidência (7 detectores)")
+    escalation_sub = p_escalation.add_subparsers(dest="escalation_action", required=True)
+    escalation_sub.add_parser("list").set_defaults(func=cmd_escalation_list)
+    p_escalation_set = escalation_sub.add_parser("set")
+    p_escalation_set.add_argument("--enabled", choices=["on", "off"])
+    p_escalation_set.add_argument("--tracking-window-s", dest="tracking_window_s", type=int)
+    p_escalation_set.add_argument("--base-ttl-s", dest="base_ttl_s", type=int)
+    p_escalation_set.add_argument("--factor", type=float)
+    p_escalation_set.add_argument("--max-ttl-s", dest="max_ttl_s", type=int)
+    p_escalation_set.add_argument("--max-steps", dest="max_steps", type=int)
+    p_escalation_set.set_defaults(func=cmd_escalation_set)
 
     sub.add_parser("reload").set_defaults(func=cmd_reload)
     sub.add_parser("stop").set_defaults(func=cmd_stop)

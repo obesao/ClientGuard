@@ -56,6 +56,7 @@ def _record_signal(conn: sqlite3.Connection, src_ip: str, customer_prefix: str |
                         mitigation_ctx["cfg"], mitigation_ctx["fg_socket_path"],
                         mitigation_ctx.get("baseline_min_samples", 120),
                         mitigation_ctx.get("flowguard_path", "/root/flowguard"),
+                        mitigation_ctx.get("escalation_cfg"),
                     )
             return
         signal_id = storage.insert_suspicious_client(conn, {
@@ -71,6 +72,7 @@ def _record_signal(conn: sqlite3.Connection, src_ip: str, customer_prefix: str |
             mitigation_ctx["cfg"], mitigation_ctx["fg_socket_path"],
             mitigation_ctx.get("baseline_min_samples", 120),
             mitigation_ctx.get("flowguard_path", "/root/flowguard"),
+            mitigation_ctx.get("escalation_cfg"),
         )
 
     explanation = None
@@ -342,9 +344,15 @@ def detect_malicious_contact(conn: sqlite3.Connection, window_s: int, threat_fee
     for r in rows:
         if r["src_ip"] in whitelist:
             continue
+        # mitigation_match escopa o bloqueio automático a "cliente -> aquele IP
+        # malicioso específico" — sem isso, auto_mitigate=discard bloquearia o
+        # cliente INTEIRO (qualquer destino) só por ele ter tocado 1 IP do threat
+        # feed. Mesma correção já aplicada em detect_dns_tunneling (dst_prefix do
+        # resolver suspeito), agora estendida pra cá.
         _record_signal(conn, r["src_ip"], r["customer_prefix"], "malicious_contact", 0.9,
                         {"dst_ip": r["dst_ip"], "window_s": window_s},
-                        webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx)
+                        webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx,
+                        {"dst_prefix": f"{r['dst_ip']}/32"})
 
 
 def detect_shared_destination(conn: sqlite3.Connection, window_s: int, min_distinct_clients: int,
@@ -389,12 +397,17 @@ def detect_shared_destination(conn: sqlite3.Connection, window_s: int, min_disti
         for c in clients:
             if c["src_ip"] in whitelist:
                 continue
+            # mitigation_match escopa o bloqueio a "cliente -> aquele destino
+            # coordenado específico" — sem isso, auto_mitigate=discard bloquearia o
+            # cliente INTEIRO por participar de 1 grupo de destino coordenado, mesma
+            # classe de correção de detect_malicious_contact acima.
             _record_signal(conn, c["src_ip"], c["customer_prefix"], "coordinated_destination",
                             min(1.0, g["n_clients"] / (effective * 2)),
                             {"dst_ip": g["dst_ip"], "dst_port": g["dst_port"], "n_clients": g["n_clients"],
                              "other_clients": [ip for ip in client_ips if ip != c["src_ip"]][:10],
                              "window_s": window_s},
-                            webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx)
+                            webhook_url, ai_client, db_lock, wa_cfg, mitigation_ctx,
+                            {"dst_prefix": f"{g['dst_ip']}/32", "dst_port": str(g["dst_port"])})
 
 
 def detect_dns_tunneling(conn: sqlite3.Connection, window_s: int, min_queries: int, whitelist: set,
@@ -460,7 +473,7 @@ def _template_overrides(customers: list[dict], templates: dict, key: str) -> dic
 
 def run_all(conn: sqlite3.Connection, config: dict, whitelist: set, customers: list[dict] = (),
             ai_client=None, threat_feed=None, db_lock=None, toggles: dict = None,
-            mitigation_cfg: dict = None, templates: dict = None) -> None:
+            mitigation_cfg: dict = None, templates: dict = None, escalation_cfg: dict = None) -> None:
     """toggles (ver configio.DEFAULT_FEATURE_TOGGLES) liga/desliga cada detector
     individualmente, e ai_explanations liga/desliga a explicação de IA pra qualquer
     sinal que dispare nesse ciclo — chave ausente = habilitado, pra não mudar
@@ -494,6 +507,7 @@ def run_all(conn: sqlite3.Connection, config: dict, whitelist: set, customers: l
             "fg_socket_path": config.get("flowguard_socket", "/var/run/flowguard.sock"),
             "baseline_min_samples": config.get("dns_baseline", {}).get("min_samples", 120),
             "flowguard_path": config.get("flowguard_reuse", {}).get("path", "/root/flowguard"),
+            "escalation_cfg": escalation_cfg,
         }
     # customer_prefix -> fator: quantas identidades reais um único src_ip visível daquele
     # prefixo pode representar (ex.: pool de CGNAT pós-NAT). Default implícito é 1 (sem

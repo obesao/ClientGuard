@@ -23,6 +23,7 @@ import ai_client
 import configio
 import detector
 import edge_mitigation
+import escalation
 import flowspec_mitigation
 import geoip
 import socket_server
@@ -59,6 +60,8 @@ class ClientGuardDaemon:
             self.config.get("edge_mitigation_file", edge_mitigation.DEFAULT_CONFIG_PATH))
         self.flowspec_mitigation_cfg = flowspec_mitigation.load_config(
             self.config.get("flowspec_mitigation_file", flowspec_mitigation.DEFAULT_CONFIG_PATH))
+        self.escalation_cfg = escalation.load_config(
+            self.config.get("escalation_file", escalation.DEFAULT_CONFIG_PATH))
         self.detection_templates = configio.load_detection_templates(
             self.config.get("detection_templates_file", configio.DEFAULT_DETECTION_TEMPLATES_PATH))
         self.config["detection"] = {**self._detection_base, **configio.load_detection_overrides(
@@ -79,6 +82,8 @@ class ClientGuardDaemon:
             self.config.get("edge_mitigation_file", edge_mitigation.DEFAULT_CONFIG_PATH))
         self.flowspec_mitigation_cfg = flowspec_mitigation.load_config(
             self.config.get("flowspec_mitigation_file", flowspec_mitigation.DEFAULT_CONFIG_PATH))
+        self.escalation_cfg = escalation.load_config(
+            self.config.get("escalation_file", escalation.DEFAULT_CONFIG_PATH))
         self.detection_templates = configio.load_detection_templates(
             self.config.get("detection_templates_file", configio.DEFAULT_DETECTION_TEMPLATES_PATH))
         # recalculado a partir do snapshot de config.yaml (_detection_base) + overrides
@@ -239,7 +244,7 @@ class ClientGuardDaemon:
             detector.run_all(self.conn, self.config, self.whitelist, customers=self.customers,
                               ai_client=self.ai_client, threat_feed=self.threat_feed, db_lock=self.db_lock,
                               toggles=self.toggles, mitigation_cfg=self.flowspec_mitigation_cfg,
-                              templates=self.detection_templates)
+                              templates=self.detection_templates, escalation_cfg=self.escalation_cfg)
             # depois de run_all, não antes — precisa saber quais (src_ip, classe) foram
             # flagrados NESTE ciclo pra excluir da baseline (anti-poisoning).
             self._update_traffic_baselines(groups, amplifier_ports, now)

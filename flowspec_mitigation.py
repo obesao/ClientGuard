@@ -49,6 +49,7 @@ import yaml
 
 import control
 import edge_mitigation
+import escalation
 import storage
 
 LOG = logging.getLogger("clientguard.flowspec_mitigation")
@@ -531,11 +532,17 @@ _applying_src_ips: set[str] = set()
 def trigger_async(conn: sqlite3.Connection, db_lock, src_ip: str, signal_id: int,
                    signal_type: str, mitigation_match: dict | None, cfg: dict,
                    fg_socket_path: str, baseline_min_samples: int = 120,
-                   flowguard_path: str = "/root/flowguard") -> None:
+                   flowguard_path: str = "/root/flowguard", escalation_cfg: dict | None = None) -> None:
     """Dispara apply_and_record em thread separada — usado pelo gatilho automático dos
     detectores, que não pode travar o ciclo de agregação esperando o round-trip do
     socket do FlowGuard. Não duplica se já houver uma aplicação em andamento pro
-    mesmo src_ip (ver _applying_src_ips)."""
+    mesmo src_ip (ver _applying_src_ips).
+
+    escalation_cfg (ver escalation.py) faz a duração do bloqueio crescer com
+    reincidência do MESMO src_ip — None (ou ausente) mantém o comportamento antigo
+    (sempre cfg["default_ttl_s"] fixo). Só afeta o gatilho AUTOMÁTICO; a rota
+    manual (socket_server._cmd_block_add -> edge_mitigation.apply_and_record) não
+    passa por aqui e continua com TTL escolhido pelo operador."""
     with _applying_lock:
         if src_ip in _applying_src_ips:
             return
@@ -543,8 +550,14 @@ def trigger_async(conn: sqlite3.Connection, db_lock, src_ip: str, signal_id: int
 
     def _run() -> None:
         try:
+            if escalation_cfg is not None:
+                lock = db_lock or nullcontext()
+                with lock:
+                    ttl_s = escalation.next_ttl_s(conn, src_ip, escalation_cfg, base_ttl_s=cfg.get("default_ttl_s"))
+            else:
+                ttl_s = cfg.get("default_ttl_s")
             apply_and_record(conn, db_lock, src_ip, signal_id, signal_type, mitigation_match,
-                              cfg.get("default_ttl_s"), "auto", cfg, fg_socket_path,
+                              ttl_s, "auto", cfg, fg_socket_path,
                               baseline_min_samples, flowguard_path)
         except Exception:
             LOG.exception("falha ao aplicar mitigação FlowSpec automática para %s", src_ip)
