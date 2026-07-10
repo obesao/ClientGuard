@@ -62,6 +62,17 @@ _DETECTION_OVERRIDES_LOCK = threading.Lock()
 # idem, pro read-modify-write de escalation.yaml.
 _ESCALATION_CFG_LOCK = threading.Lock()
 
+# Cache curto de storage.top_src_ips (achado real, profiling de CPU 2026-07-10:
+# sozinho respondia por ~52% da CPU do daemon — GROUP BY sem filtro de src_ip
+# sobre client_flow_aggs, chamado de novo a cada abertura de aba/troca de janela
+# no portal, às vezes de várias sessões de browser quase ao mesmo tempo pedindo
+# EXATAMENTE a mesma (window_s, limit)). TTL curto (não muda o comportamento
+# visível — ninguém precisa de um ranking atualizado a cada segundo — só absorve
+# chamadas duplicadas próximas no tempo).
+_TOP_CACHE_LOCK = threading.Lock()
+_TOP_CACHE: dict[tuple, tuple[float, list]] = {}
+_TOP_CACHE_TTL_S = 20.0
+
 WHITELIST_HEADER = (
     "# whitelist.yaml — src_ip/prefixos que NUNCA devem gerar alerta no ClientGuard\n"
     "# (servidores de e-mail/DNS/NTP legítimos de clientes corporativos, backups, etc.)\n"
@@ -177,8 +188,16 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
         d = self.daemon_ref
         limit = int(request.get("limit", 20))
         window_s = int(request.get("window_s") or d.config["database"]["aggregate_interval_s"])
+        cache_key = (window_s, limit)
+        now = time.time()
+        with _TOP_CACHE_LOCK:
+            cached = _TOP_CACHE.get(cache_key)
+            if cached is not None and now - cached[0] < _TOP_CACHE_TTL_S:
+                return {"ok": True, "top": cached[1]}
         with self._read_conn() as rconn:
             top = storage.top_src_ips(rconn, window_s, limit)
+        with _TOP_CACHE_LOCK:
+            _TOP_CACHE[cache_key] = (now, top)
         return {"ok": True, "top": top}
 
     def _cmd_client_detail(self, request: dict) -> dict:

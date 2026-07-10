@@ -178,6 +178,18 @@ def test_prune_old_aggs_removes_only_expired_rows(conn):
     assert [r["src_ip"] for r in remaining] == ["177.86.19.9"]
 
 
+def test_prune_old_aggs_removes_across_multiple_batches(conn):
+    old_ts = int(time.time()) - 10 * 86400
+    for i in range(25):
+        insert_flow(conn, f"177.86.19.{i}", "1.2.3.4", 443, protocol=6, ts=old_ts)
+    insert_flow(conn, "177.86.19.99", "1.2.3.5", 443, protocol=6)  # ts atual, sobrevive
+
+    pruned = storage.prune_old_aggs(conn, retention_days=7, batch_size=10)
+    assert pruned == 25
+    remaining = conn.execute("SELECT src_ip FROM client_flow_aggs").fetchall()
+    assert [r["src_ip"] for r in remaining] == ["177.86.19.99"]
+
+
 def test_bucket_client_port_keeps_configured_ports(conn):
     assert storage.bucket_client_port(53, {53, 123, 1900, 11211, 389}) == 53
     assert storage.bucket_client_port(11211, {53, 123, 1900, 11211, 389}) == 11211

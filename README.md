@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.31.0**
+**Versão atual: v1.32.0**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,31 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.32.0 — 2026-07-10 — Corrige CPU alta: lotes no prune + cache curto no ranking de Top Clientes
+
+Achado via profiling real (py-spy, 60s de amostragem) depois do usuário
+reportar CPU alta. Duas funções respondiam por 81% da CPU do daemon:
+
+**`prune_old_aggs` (29%)** — fazia 1 `DELETE` sem lotes (transação única) sobre
+`client_flow_aggs` (300M+ linhas), 1x/hora, seguido de `ANALYZE` completo.
+Mesmo bug já corrigido no `flow_aggs` do FlowGuard, nunca portado pra cá.
+Agora em lotes de 100k com commit intermediário — `ANALYZE` continua rodando
+só 1x no final (é o que corrige o plano ruim do query planner, não precisa
+rodar por lote).
+
+**`top_src_ips` (52%)** — `GROUP BY src_ip` sem filtro sobre a tabela inteira,
+chamado de novo a cada abertura de aba/troca de janela do painel "Top
+Clientes" no portal — já documentado como o comando mais pesado do daemon,
+mas sem nenhuma proteção contra chamadas duplicadas em sequência (múltiplas
+abas de browser, ou o mesmo operador trocando de aba rápido). Cache curto
+(20s) no socket, chaveado por `(window_s, limit)` — não muda o comportamento
+visível (ninguém precisa de um ranking atualizado a cada segundo), só absorve
+chamadas repetidas próximas no tempo. Redesenho maior (rollup pré-agregado)
+ficou de fora desta correção — é mudança de schema, não cabe num fix pontual.
+
+6 testes novos (lotes de prune + cache do `top`, incluindo expiração de TTL e
+chave por janela/limite).
 
 ### v1.31.0 — 2026-07-08 — Liga malicious_contact/coordinated_destination + bloqueio progressivo por reincidência
 

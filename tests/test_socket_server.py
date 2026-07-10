@@ -8,6 +8,7 @@ que não tinham nenhum teste automatizado antes desta suíte existir."""
 from __future__ import annotations
 
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,6 +18,7 @@ import edge_mitigation
 import flowspec_mitigation
 import socket_server
 import storage
+from conftest import insert_flow
 
 
 class FakeDaemon:
@@ -299,6 +301,54 @@ def test_edge_list_returns_all_by_default(server, conn):
     resp = server.dispatch({"cmd": "edge_list"})
     assert resp["ok"] is True
     assert len(resp["mitigations"]) == 2
+
+
+# --- top (cache curto, achado de profiling de CPU 2026-07-10) --------------
+
+@pytest.fixture(autouse=True)
+def _clear_top_cache():
+    # estado global compartilhado entre testes (mesmo módulo) — sem isso, o
+    # cache de um teste "vaza" pro próximo e mascara o resultado esperado.
+    socket_server._TOP_CACHE.clear()
+    yield
+    socket_server._TOP_CACHE.clear()
+
+
+def test_top_returns_ranking_by_bytes(server, conn):
+    insert_flow(conn, "177.86.19.1", "1.2.3.4", 443, protocol=6, bytes_=1000)
+    insert_flow(conn, "177.86.19.2", "1.2.3.5", 443, protocol=6, bytes_=5000)
+    resp = server.dispatch({"cmd": "top", "window_s": 3600, "limit": 20})
+    assert resp["ok"] is True
+    assert resp["top"][0]["src_ip"] == "177.86.19.2"
+
+
+def test_top_second_call_within_ttl_hits_cache_not_db(server, conn):
+    insert_flow(conn, "177.86.19.3", "1.2.3.4", 443, protocol=6, bytes_=1000)
+    first = server.dispatch({"cmd": "top", "window_s": 3600, "limit": 20})
+    # muda o banco DEPOIS da 1ª chamada — se a 2ª chamada consultasse de novo,
+    # o resultado mudaria; permanecer igual comprova que veio do cache
+    insert_flow(conn, "177.86.19.4", "1.2.3.5", 443, protocol=6, bytes_=99999)
+    second = server.dispatch({"cmd": "top", "window_s": 3600, "limit": 20})
+    assert second == first
+
+
+def test_top_cache_expires_after_ttl(server, conn, monkeypatch):
+    insert_flow(conn, "177.86.19.5", "1.2.3.4", 443, protocol=6, bytes_=1000)
+    server.dispatch({"cmd": "top", "window_s": 3600, "limit": 20})
+    insert_flow(conn, "177.86.19.6", "1.2.3.5", 443, protocol=6, bytes_=99999)
+    real_time = time.time
+    monkeypatch.setattr(socket_server.time, "time", lambda: real_time() + 999)
+    second = server.dispatch({"cmd": "top", "window_s": 3600, "limit": 20})
+    assert second["top"][0]["src_ip"] == "177.86.19.6"
+
+
+def test_top_cache_keyed_by_window_and_limit(server, conn):
+    insert_flow(conn, "177.86.19.7", "1.2.3.4", 443, protocol=6, bytes_=1000)
+    server.dispatch({"cmd": "top", "window_s": 3600, "limit": 20})
+    insert_flow(conn, "177.86.19.8", "1.2.3.5", 443, protocol=6, bytes_=99999)
+    # window_s diferente -> chave de cache diferente -> não reusa o resultado antigo
+    resp = server.dispatch({"cmd": "top", "window_s": 7200, "limit": 20})
+    assert resp["top"][0]["src_ip"] == "177.86.19.8"
 
 
 def test_edge_list_active_only(server, conn):

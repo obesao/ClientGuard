@@ -231,13 +231,30 @@ def insert_client_flow_aggs_batch(conn: sqlite3.Connection, rows: list[dict]) ->
     conn.commit()
 
 
-def prune_old_aggs(conn: sqlite3.Connection, retention_days: int) -> int:
+def prune_old_aggs(conn: sqlite3.Connection, retention_days: int, batch_size: int = 100_000) -> int:
+    """Remove agregados fora da retenção em lotes, com commit intermediário —
+    achado real (2026-07-10, profiling de CPU): DELETE único sob 300M+ linhas
+    prendia a conexão de escrita por um bom tempo numa transação só (nenhuma
+    agregação/detecção grava nesse meio tempo) e inflava o WAL de uma vez — mesmo
+    bug já corrigido no flow_aggs do FlowGuard (ver storage.py de lá), nunca
+    portado pra cá. ANALYZE continua rodando só 1x no final, não a cada lote —
+    é o que corrige o plano ruim do query planner (ver comentário em
+    compact_client_flow_aggs), não precisa rodar mais que 1x por prune."""
     cutoff = int(time.time()) - retention_days * 86400
-    cur = conn.execute("DELETE FROM client_flow_aggs WHERE ts < ?", (cutoff,))
-    conn.commit()
+    total = 0
+    while True:
+        cur = conn.execute(
+            "DELETE FROM client_flow_aggs WHERE rowid IN "
+            "(SELECT rowid FROM client_flow_aggs WHERE ts < ? LIMIT ?)",
+            (cutoff, batch_size),
+        )
+        conn.commit()
+        total += cur.rowcount
+        if cur.rowcount < batch_size:
+            break
     conn.execute("ANALYZE")
     conn.commit()
-    return cur.rowcount
+    return total
 
 
 def insert_suspicious_client(conn: sqlite3.Connection, row: dict) -> int:
