@@ -370,26 +370,22 @@ def top_src_ips(conn: sqlite3.Connection, window_s: int, limit: int) -> list[dic
     return [dict(r) for r in rows]
 
 
-def daemon_stats(conn: sqlite3.Connection, window_s: int) -> dict:
+def daemon_stats(conn: sqlite3.Connection) -> dict:
     """Não inclui total_rows de propósito — um COUNT(*) sem WHERE sobre
     client_flow_aggs é uma varredura da tabela inteira (achado real: ~2.5s sob
     ~26M linhas, chamado a cada poll de status do portal) sem nenhum ganho real
     de precisão sobre manter a contagem incremental em memória no daemon (ver
     ClientGuardDaemon.total_rows em clientguard.py, atualizado a cada
-    insert/prune em vez de recontado a cada status)."""
-    since = int(time.time()) - window_s
-    flows_window = conn.execute(
-        "SELECT COUNT(*) FROM client_flow_aggs WHERE ts >= ?", (since,),
-    ).fetchone()[0]
-    distinct_src_ips = conn.execute(
-        "SELECT COUNT(DISTINCT src_ip) FROM client_flow_aggs WHERE ts >= ?", (since,),
-    ).fetchone()[0]
+    insert/prune em vez de recontado a cada status).
+
+    Também não tem mais flows_window/distinct_src_ips (removidos 2026-07-10, a
+    pedido do usuário — não eram usados pra nada na operação real). O 2º era
+    um COUNT(DISTINCT src_ip), ~137ms por chamada mesmo só numa janela de 30s
+    — chamado a cada poll de status do portal (5s), ~2.7% de 1 core sem
+    nenhum uso real."""
     open_signals = conn.execute("SELECT COUNT(*) FROM suspicious_clients WHERE resolved = 0").fetchone()[0]
     active_mitigations = conn.execute("SELECT COUNT(*) FROM edge_mitigations WHERE status = 'active'").fetchone()[0]
-    return {
-        "flows_window": flows_window, "distinct_src_ips": distinct_src_ips,
-        "open_signals": open_signals, "active_mitigations": active_mitigations,
-    }
+    return {"open_signals": open_signals, "active_mitigations": active_mitigations}
 
 
 def load_geoip_cache(conn: sqlite3.Connection) -> dict[str, tuple[int | None, str | None]]:

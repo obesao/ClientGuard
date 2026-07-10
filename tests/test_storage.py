@@ -23,7 +23,7 @@ def test_daemon_stats_counts_only_active_mitigations(conn):
     storage.insert_edge_mitigation(conn, "1.2.3.4", None, 3600, "manual")
     reverted_id = storage.insert_edge_mitigation(conn, "5.6.7.8", None, 3600, "manual")
     storage.mark_edge_reverted(conn, reverted_id)
-    stats = storage.daemon_stats(conn, 30)
+    stats = storage.daemon_stats(conn)
     assert stats["active_mitigations"] == 1
 
 

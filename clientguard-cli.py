@@ -136,8 +136,6 @@ def cmd_status(args: argparse.Namespace, sock_path: str) -> None:
     table.add_row("PID", str(resp["pid"]))
     table.add_row("Uptime", f"{resp['uptime_s']:.0f}s")
     table.add_row("Captura", f"{resp['iface']} ({resp['bpf_filter']})")
-    table.add_row("Flows na janela atual", str(resp["flows_window"]))
-    table.add_row("Clientes ativos na janela", str(resp["distinct_src_ips"]))
     table.add_row("Total de agregados no banco", str(resp["total_rows"]))
     table.add_row("Sinais suspeitos abertos", str(resp["open_signals"]))
     table.add_row("Clientes cadastrados", str(resp["n_customers"]))
@@ -449,8 +447,6 @@ def build_dashboard(sock_path: str, fg_sock_path: str) -> Group:
     bgp = fetch_bgp_status(fg_sock_path)
 
     statusbar = (
-        f"Flows/janela: [bold]{status['flows_window']}[/bold]  |  "
-        f"Clientes ativos: [bold]{status['distinct_src_ips']}[/bold]  |  "
         f"Sinais abertos: [bold red]{status['open_signals']}[/bold red]  |  "
         f"Cadastrados: [bold]{status['n_customers']}[/bold]  |  "
         f"Whitelist: [bold]{status['n_whitelist']}[/bold]  |  "

@@ -173,9 +173,8 @@ class SocketServer(socketserver.ThreadingUnixStreamServer):
 
     def _cmd_status(self, request: dict) -> dict:
         d = self.daemon_ref
-        interval = d.config["database"]["aggregate_interval_s"]
         with self._read_conn() as rconn:
-            stats = storage.daemon_stats(rconn, interval)
+            stats = storage.daemon_stats(rconn)
         return {
             "ok": True, "pid": os.getpid(), "uptime_s": time.time() - d.started_at,
             "iface": d.config["capture"]["iface"], "bpf_filter": d.config["capture"]["bpf_filter"],

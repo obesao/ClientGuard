@@ -1,6 +1,6 @@
 # ClientGuard
 
-**Versão atual: v1.32.0**
+**Versão atual: v1.32.1**
 
 Sistema de detecção de clientes comprometidos via NetFlow para o provedor de internet.
 Reaproveita passivamente o mesmo feed de NetFlow que já chega para o [FlowGuard](../flowguard)
@@ -97,6 +97,19 @@ clientguard-cli toggles set <funcao> on|off
 
 Formato livre, mais detalhado que o log do git — pense nisso como o "o que mudou e
 por quê" de cada leva de trabalho.
+
+### v1.32.1 — 2026-07-10 — Remove flows_window/distinct_src_ips (não usados, 137ms/poll de 5s)
+
+Pedido do usuário: 2 caixinhas da aba ClientGuard ("Flows na janela"/"Clientes
+ativos") não eram usadas. Medido antes de remover: `flows_window` (COUNT(*))
+custava 0.7ms — de graça, não valia a pena; `distinct_src_ips` (COUNT(DISTINCT
+src_ip)) custava **137ms por chamada**, rodando a cada poll de status do
+portal (5s) — ~2.7% de 1 core sem parar, só pra alimentar um número que
+ninguém olhava. Removido de `daemon_stats()` (agora só `open_signals`/
+`active_mitigations`, os dois únicos campos ainda em uso), `_cmd_status`,
+`clientguard-cli status`/`watch`, e os dois lugares no portal que
+mostravam isso (as 2 caixinhas da aba + o widget "clientes ativos" do
+cockpit, que dependia do mesmo campo).
 
 ### v1.32.0 — 2026-07-10 — Corrige CPU alta: lotes no prune + cache curto no ranking de Top Clientes
 
