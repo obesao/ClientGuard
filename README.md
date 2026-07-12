@@ -223,9 +223,9 @@ o índice ser construído num momento controlado (ou o volume da tabela ser
 endereçado à parte). Serviço reiniciado em produção sem downtime
 perceptível (só código novo, sem migração de schema desta vez).
 
-### v1.29.1 — 2026-07-07 — Ajuste operacional: template cdn migra de 16 pra 17, IA de explicação desligada
-`customers.yaml`: template `cdn` sai de `177.86.16.0/24` e passa pra
-`177.86.17.0/24` — decisão operacional do usuário, sem mudança de código.
+### v1.29.1 — 2026-07-07 — Ajuste operacional: template cdn migra de prefixo, IA de explicação desligada
+`customers.yaml`: template `cdn` sai de um prefixo (`x.x.x.0/24`) e passa pra
+outro (`x.x.x.0/24`) — decisão operacional do usuário, sem mudança de código.
 `toggles.yaml`: `ai_explanations` desligado (consistente com a IA estar sem
 crédito na conta Anthropic — ver CHANGELOG do `flowguard` v1.27.0 — evita
 tentativa de chamada que só vai falhar).
@@ -275,13 +275,13 @@ de CGNAT e CDN pra facilitar ajustar os limites de cada barramento `/24` sem
 recalibrar os mesmos números na mão pra cada rede nova do mesmo perfil.
 
 **Achado que motivou reabrir o limiar global**: analisando só os prefixos SEM
-CGNAT (177.86.17/18/19/22/23), o p99.9 de scan_vertical parecia 2217 — bem
+CGNAT (5 prefixos `/24`), o p99.9 de scan_vertical parecia 2217 — bem
 acima do que o resto da base precisa — mas isso vinha de UM host só
-(`177.86.17.51`) claramente um relay/TURN interno (conectando a dezenas de
+claramente um relay/TURN interno (conectando a dezenas de
 clientes CGNAT com centenas/milhares de portas por destino, sustentado por
 horas, com volume real — confirmado com o usuário como serviço próprio da
-POX). **Esse IP já estava coberto por uma faixa existente em `whitelist.yaml`
-(177.86.17.48/29)** — não precisou de mudança ali, só confirma que o
+operadora). **Esse IP já estava coberto por uma faixa existente em `whitelist.yaml`
+(bloco `/29` dedicado)** — não precisou de mudança ali, só confirma que o
 mecanismo certo pra exceção de 1 host específico é whitelist, não afrouxar o
 limiar de toda uma `/24`. Sem esse outlier, o limiar "normal" real fica bem
 mais baixo — por isso os limiares globais da v1.27.0 (250/300, calibrados só
@@ -299,9 +299,9 @@ quando os dois se acumulam (ex.: pool CGNAT pós-NAT com template E
 multiplier). Sem `template`, o prefixo cai no limiar global normalmente —
 nenhuma mudança de comportamento pra quem não usa a feature.
 
-Atribuído nesta leva: `100.64.0.0/10` (CGNAT-PPPOE) e `177.86.20.0/24`/
-`177.86.21.0/24` (CGNAT-B20/B21, mantendo o `client_multiplier: 32` já
-existente) → `cgnat`; `177.86.16.0/24` (core da POX) → `cdn`.
+Atribuído nesta leva: `100.64.0.0/10` (CGNAT-PPPOE) e 2 prefixos `/24`
+(CGNAT-B20/B21, mantendo o `client_multiplier: 32` já
+existente) → `cgnat`; 1 prefixo `/24` (core da operadora) → `cdn`.
 
 10 testes novos (`test_configio.py`, `test_detector.py`) cobrindo o loader,
 a resolução isolada por template e a combinação template+multiplier;
@@ -598,11 +598,11 @@ via SSH read-only na caixa PPPoE (roteador de borda, credenciais já em
   `display bgp peer ... verbose` sem `flow` só mostra a AFI unicast, vazia
   nesta sessão — pareceu "0 recebidas" por engano).
 - **Causa raiz real**: a caixa PPPoE tem uma `traffic-policy P-CGNAT` GLOBAL
-  (`inbound global-acl`) que redireciona todo tráfego de cliente pro A10
-  (CGNAT) com precedência MAIOR que o filtro instalado pelo FlowSpec.
+  (`inbound global-acl`) que redireciona todo tráfego de cliente pro
+  appliance CGNAT com precedência MAIOR que o filtro instalado pelo FlowSpec.
   Confirmado com dado real: um cliente com regra `discard` ativa e válida no
   roteador continuava gerando tráfego pro alvo que deveria estar bloqueado,
-  inclusive chegando até o IP interno do A10 (`10.71.71.4`).
+  inclusive chegando até o IP interno do appliance CGNAT (`10.71.71.4`).
 - A própria política já tinha uma válvula de escape: o classificador
   `C-CGNAT-BYPASS` (ACL 3001), precedência mais alta, comportamento vazio
   (não redireciona — tráfego cai na rota normal, onde o FlowSpec finalmente
@@ -656,35 +656,37 @@ via SSH read-only na caixa PPPoE (roteador de borda, credenciais já em
   consultas a resolvers legítimos.
 - **2 bugs reais corrigidos** (ambos faziam a mitigação "aplicar" no banco
   sem efeito real nenhum): (1) toda mitigação ia pro peer BGP errado
-  ('main'/NE8000BGP em vez de 'pppoe'/NE8000-PPPOE, que é por onde o
+  ('main'/roteador-borda-BGP em vez de 'pppoe'/NAT-PPPoE, que é por onde o
   tráfego de cliente realmente passa desde a v1.17.1); (2) `build_rule()`
   descartava o recorte inteiro no branch `discard`, só aplicava no
   `rate_limit`.
 
 ### v1.17.1 — 2026-07-03 — Escuta só a caixa PPPOE, desliga a caixa BGP
-- Pedido do usuário: parar de escutar as 2 caixas (NE8000BGP na porta 2055,
-  mesmo feed do FlowGuard, + NE8000-PPPOE na 2060) — agora só a PPPOE.
-  `bpf_filter` de `"udp port 2055 or udp port 2060"` para `"udp port 2060"`.
+- Pedido do usuário: parar de escutar as 2 caixas (roteador de borda BGP na
+  porta 2055, mesmo feed do FlowGuard, + NAT PPPoE na 2060) — agora só a
+  PPPOE. `bpf_filter` de `"udp port 2055 or udp port 2060"` para
+  `"udp port 2060"`.
 - Confirmado em produção: volume por ciclo caiu de ~110-125k pra ~20-30k
   flows, e "sem cliente identificado" caiu de ~16k pra ~1 por ciclo — a
   maior parte do tráfego não-identificável vinha da caixa BGP (tráfego
   geral de internet dos prefixos monitorados, não sessão de cliente PPPoE).
 
-### v1.17.0 — 2026-07-03 — Captura passa do A10 (CGNAT) pro NE8000-PPPOE
-- Pedido do usuário: escutar mais um equipamento de NetFlow (o A10 que faz
-  CGNAT) além do NE8000 já observado. Confirmado por captura real que o
-  `src_ip` desse feed é PRÉ-NAT (IP interno do cliente em `100.64.0.0/16`,
-  um IP por cliente) — cada cliente já chega identificável, sem precisar de
-  `client_multiplier`.
-- **Achado real na validação**: o A10 não preenche o campo `SAMPLING_INTERVAL`
-  do NetFlow e não tem sampling configurado no equipamento (log completo,
-  não amostrado) — volume de ~157 mil flows/25s estourou a fila interna do
-  daemon (200k, drenada 1x por ciclo de 30s de agregação), causando descarte
-  silencioso de dezenas de milhares de flows por minuto. Novo campo de
-  config `capture.sampling_rate_by_peer` (por IP de origem do export)
-  resolveria o cálculo de bytes/pacotes, mas não o problema de volume em si.
-- A pedido do usuário, a captura do A10 foi pausada (removida do
-  `bpf_filter`) e substituída pelo NetFlow do NE8000-PPPOE (mesmo roteador
+### v1.17.0 — 2026-07-03 — Captura passa do appliance CGNAT pro NAT PPPoE
+- Pedido do usuário: escutar mais um equipamento de NetFlow (o appliance
+  dedicado que faz CGNAT) além do roteador de borda já observado. Confirmado
+  por captura real que o `src_ip` desse feed é PRÉ-NAT (IP interno do
+  cliente em `100.64.0.0/16`, um IP por cliente) — cada cliente já chega
+  identificável, sem precisar de `client_multiplier`.
+- **Achado real na validação**: o appliance CGNAT não preenche o campo
+  `SAMPLING_INTERVAL` do NetFlow e não tem sampling configurado no
+  equipamento (log completo, não amostrado) — volume de ~157 mil flows/25s
+  estourou a fila interna do daemon (200k, drenada 1x por ciclo de 30s de
+  agregação), causando descarte silencioso de dezenas de milhares de flows
+  por minuto. Novo campo de config `capture.sampling_rate_by_peer` (por IP
+  de origem do export) resolveria o cálculo de bytes/pacotes, mas não o
+  problema de volume em si.
+- A pedido do usuário, a captura do appliance CGNAT foi pausada (removida do
+  `bpf_filter`) e substituída pelo NetFlow do NAT PPPoE (mesmo roteador
   usado pro Modo Guerra/ACL, exportando numa porta separada) — volume bem
   menor (~155 flows/s), sem risco de estourar a fila. Também confirmado
   pré-NAT, mesma lógica de sampling ausente (assumido 1:1).
@@ -722,8 +724,8 @@ via SSH read-only na caixa PPPoE (roteador de borda, credenciais já em
 
 ### v1.15.0 — 2026-07-02 — Corrige driver Netmiko: mitigação de borda não estava aplicando de verdade
 - **Bug real** (mesma causa raiz documentada no CHANGELOG do `flowguard`):
-  `warmode.yaml` tinha o equipamento `NE8000BGP` com `device_type:
-  huawei_vrp`, mas esse NE8000 de carrier usa o modelo de config candidata
+  `warmode.yaml` tinha o roteador de borda com `device_type:
+  huawei_vrp`, mas esse roteador de carrier usa o modelo de config candidata
   do VRP — ao aplicar uma ACL via `edge_mitigation.py`
   (`conn.send_config_set(...)`), o equipamento pergunta interativamente se
   deve commitar antes de sair do modo de configuração, e o driver
